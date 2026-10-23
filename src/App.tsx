@@ -45,6 +45,7 @@ import { CustomerSidebar, CustomerPanelTab } from './components/CustomerSidebar'
 import { MarketplaceModal } from './components/MarketplaceModal';
 import { CustomerAuthModal } from './components/CustomerAuthModal';
 import { CustomerWelcomeAuthGate } from './components/CustomerWelcomeAuthGate';
+import { CustomerBottomNav } from './components/CustomerBottomNav';
 import { Megaphone, ShieldAlert, Sparkles, Lock, AlertTriangle, CheckCircle2, X } from 'lucide-react';
 
 // Service Modals
@@ -279,6 +280,8 @@ export default function App() {
   // Modals state
   const [activeServiceModal, setActiveServiceModal] = useState<ServiceId | null>(null);
   const [isFundWalletOpen, setIsFundWalletOpen] = useState(false);
+  const [fundWalletInitialTab, setFundWalletInitialTab] = useState<'manual' | 'gateway' | 'history'>('manual');
+  const [currentBottomNavTab, setCurrentBottomNavTab] = useState<'home' | 'marketplace' | 'wallet' | 'support' | 'profile'>('home');
   const [isSupportOpen, setIsSupportOpen] = useState(false);
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [isMarketplaceOpen, setIsMarketplaceOpen] = useState(false);
@@ -940,17 +943,7 @@ export default function App() {
     );
   }
 
-  // Strict Customer Login Gate: Show professional yellow-and-blue welcome page first
-  if (currentRoute === 'customer' && !currentCustomer) {
-    return (
-      <CustomerWelcomeAuthGate
-        onAuthSuccess={handleCustomerAuthSuccess}
-        settings={websiteMasterSettings || undefined}
-      />
-    );
-  }
-
-  // Customer Dashboard View Mode
+  // Customer Dashboard View Mode (Direct access to marketplace services & wallet)
   return (
     <div className="min-h-screen bg-[#f1f5f9] text-slate-900 flex flex-col font-sans antialiased selection:bg-blue-600/20 selection:text-blue-900">
       {/* Customer Sidebar Navigation Drawer (Slide-in mobile & desktop drawer) */}
@@ -1007,11 +1000,21 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content: 14 Services Grid */}
-      <main className="flex-1 pb-16 pt-2">
+      {/* Main Content: Redesigned Customer Dashboard */}
+      <main className="flex-1 pb-24 sm:pb-28 pt-2">
         <MainServicesGrid
           services={services}
+          wallet={wallet}
+          customer={currentCustomer}
           onSelectService={(serviceId) => setActiveServiceModal(serviceId)}
+          onOpenFundWallet={(tab) => {
+            setFundWalletInitialTab(tab || 'manual');
+            setIsFundWalletOpen(true);
+          }}
+          onOpenMarketplace={() => setIsMarketplaceOpen(true)}
+          onOpenSpecialMarketplace={() => setIsSpecialMarketplaceOpen(true)}
+          onOpenSupport={() => setIsSupportOpen(true)}
+          onOpenHistory={() => setActiveServiceModal('transaction-history')}
         />
       </main>
 
@@ -1020,6 +1023,33 @@ export default function App() {
         onOpenPartner={() => setActiveServiceModal('partner-program')}
         onOpenSupport={() => setIsSupportOpen(true)}
         onOpenDownload={() => setIsDownloadOpen(true)}
+      />
+
+      {/* Mobile & Tablet Customer Bottom Navigation Bar (Home, Marketplace, Wallet, Support, Profile) */}
+      <CustomerBottomNav
+        currentTab={currentBottomNavTab}
+        onSelectTab={(tab) => {
+          setCurrentBottomNavTab(tab);
+          if (tab === 'home') {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          } else if (tab === 'marketplace') {
+            setIsMarketplaceOpen(true);
+          } else if (tab === 'wallet') {
+            setFundWalletInitialTab('manual');
+            setIsFundWalletOpen(true);
+          } else if (tab === 'support') {
+            setIsSupportOpen(true);
+          } else if (tab === 'profile') {
+            if (currentCustomer) {
+              setIsProfileOpen(true);
+            } else {
+              setCustomerAuthMode('login');
+              setIsCustomerAuthOpen(true);
+            }
+          }
+        }}
+        wallet={wallet}
+        customer={currentCustomer}
       />
 
       {/* Service Modals */}
@@ -1173,6 +1203,7 @@ export default function App() {
           customer={currentCustomer}
           onClose={() => setIsFundWalletOpen(false)}
           onAddFunds={(amt) => handleCreditWallet(amt, 'Flutterwave Wallet Deposit')}
+          initialTab={fundWalletInitialTab}
         />
       )}
 

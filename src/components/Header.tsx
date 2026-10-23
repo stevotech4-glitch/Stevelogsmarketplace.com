@@ -45,30 +45,43 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-30 w-full bg-[#f8fafc]/95 backdrop-blur-md border-b border-slate-200/80 px-3 sm:px-6 py-2.5 sm:py-3 transition-all">
       <div className="max-w-6xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
-        {/* Left side: Hamburger Menu & Marketplace Brand Title */}
+        {/* Left side: Hamburger Menu & Marketplace Brand Title with Logo */}
         <div className="flex items-center gap-2 sm:gap-3">
           {onToggleSidebar && (
             <button
               onClick={onToggleSidebar}
-              className="w-9 h-9 rounded-xl bg-white shadow-xs border border-slate-200/90 flex items-center justify-center text-slate-800 hover:text-blue-600 hover:border-blue-300 transition-colors cursor-pointer"
+              className="w-9 h-9 rounded-xl bg-white shadow-xs border border-slate-200/90 flex items-center justify-center text-slate-800 hover:text-blue-600 hover:border-amber-400 transition-colors cursor-pointer"
               aria-label="Open Navigation Menu"
               title="Menu"
             >
               <div className="w-4 flex flex-col gap-1 items-center justify-center">
                 <span className="w-4 h-0.5 bg-slate-700 rounded-full"></span>
-                <span className="w-3.5 h-0.5 bg-slate-700 rounded-full"></span>
+                <span className="w-3.5 h-0.5 bg-amber-500 rounded-full"></span>
                 <span className="w-4 h-0.5 bg-slate-700 rounded-full"></span>
               </div>
             </button>
           )}
 
-          <div className="flex flex-col">
-            <h1 className="text-base sm:text-xl md:text-2xl font-black tracking-tight text-slate-900 font-sans leading-tight">
-              {settings?.websiteName || 'STEVE LOGS MARKETPLACE'}
-            </h1>
-            <span className="text-[10px] font-semibold text-blue-600 tracking-wide font-sans uppercase">
-              {settings?.tagline || 'Unified Multi-Provider Digital Marketplace'}
-            </span>
+          <div className="flex items-center gap-2.5">
+            <img
+              src="/stevelogs-logo.png"
+              alt="Steve Logs Marketplace Logo"
+              className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl object-contain ring-1 ring-amber-400/50 shadow-xs shrink-0 bg-slate-950/5"
+            />
+            <div className="flex flex-col">
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-base sm:text-lg md:text-xl font-black tracking-tight text-slate-900 font-sans leading-tight">
+                  STEVE LOGS
+                </h1>
+                <span className="text-[9px] sm:text-[10px] font-black px-1.5 py-0.5 rounded-md bg-amber-400 text-slate-950 uppercase tracking-wide">
+                  MARKETPLACE
+                </span>
+              </div>
+              <span className="text-[10px] font-semibold text-blue-700 tracking-wide font-sans flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                {settings?.tagline || 'Fast • Safe • Reliable Digital Services'}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -114,23 +127,24 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right side: Wallet balance, Fund, Profile & Admin */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
           {/* Balance chip */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-slate-200/90 shadow-xs text-xs font-semibold text-slate-800">
-            <Wallet className="w-3.5 h-3.5 text-blue-600" />
-            <span className="font-mono text-slate-900 font-bold">
+          <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full bg-slate-950 text-white border border-slate-800 shadow-xs text-xs font-semibold">
+            <Wallet className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="font-mono font-bold tracking-tight text-amber-300">
               {wallet.currency}{wallet.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
             </span>
           </div>
 
-          {/* Quick Fund Button */}
+          {/* Quick Fund Button (Gold Brand Theme) */}
           <button
             onClick={onOpenFundWallet}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white shadow-xs text-xs font-semibold transition-all cursor-pointer active:scale-95"
-            title="Fund Wallet"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black shadow-xs text-xs transition-all cursor-pointer active:scale-95"
+            title="Fund Wallet (Manual Bank Transfer or Card)"
           >
-            <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-            <span className="hidden sm:inline">Fund</span>
+            <Plus className="w-3.5 h-3.5 stroke-[3]" />
+            <span className="hidden sm:inline">Add Money</span>
+            <span className="sm:hidden text-[11px]">Add</span>
           </button>
 
           {/* Announcements & Updates Bell Button */}

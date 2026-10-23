@@ -13,7 +13,7 @@ export const FloatingActions: React.FC<FloatingActionsProps> = ({
   onOpenDownload,
 }) => {
   return (
-    <div className="fixed bottom-5 right-4 sm:right-6 z-40 flex flex-col items-center gap-2.5">
+    <div className="fixed bottom-20 md:bottom-6 right-3.5 sm:right-6 z-30 flex flex-col items-center gap-2">
       {/* 1. Amber Rewards / Partner Trophy Button */}
       <button
         onClick={onOpenPartner}

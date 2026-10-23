@@ -1,3 +1,4 @@
+# Steve Logs Marketplace — Production Deployment
 services:
   - type: web
     name: stevelogs-marketplace

@@ -56621,8 +56621,8 @@
       "name": "Stevo Tech (Admin/Owner)",
       "email": "stevotech2@gmail.com",
       "phone": "+2348149021844",
-      "walletBalance": 0,
-      "totalDeposited": 0,
+      "walletBalance": 25000,
+      "totalDeposited": 25000,
       "totalSpent": 0,
       "ordersCount": 0,
       "successfulOrders": 0,
@@ -56771,11 +56771,11 @@
     "disclaimer": "This is a customer loyalty reward credit program. Yield rates may be adjusted or paused based on business liquidity policy."
   },
   "wallet": {
-    "balance": 0,
+    "balance": 25000,
     "currency": "₦",
     "bonus": 0,
     "accountNumber": "0067100155",
-    "bankName": "Mock Bank",
+    "bankName": "Moniepoint MFB",
     "accountName": "Stevo Tech (Admin/Owner)"
   },
   "marketplaceCategories": [],

@@ -11,6 +11,7 @@ import { db, hashPasscode, verifyPasscode } from './src/server/db';
 import { ProviderService } from './src/server/providers';
 import { RakibSocialsClient } from './src/server/rakibClient';
 import { FlutterwaveService } from './src/server/flutterwaveService';
+import type { Transaction } from './src/types';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -613,87 +614,6 @@ app.post('/api/auth/google', (req: Request, res: Response) => {
   res.json(result);
 });
 
-// Google OAuth 2.0 Callback Handler
-app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
-  try {
-    const code = req.query.code as string;
-    const error = req.query.error as string;
-
-    if (error) {
-      res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(`Google sign-in was cancelled or encountered an error: ${error}`)}`);
-      return;
-    }
-
-    if (!code) {
-      res.redirect('/?auth_status=error&error_msg=No+authorization+code+received+from+Google');
-      return;
-    }
-
-    const settings = db.getSettings();
-    const googleClientId = process.env.GOOGLE_CLIENT_ID || settings.googleClientId || '';
-    const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || settings.googleClientSecret || '';
-    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
-    const redirectUri = `${baseUrl.replace(/\/$/, '')}/api/auth/google/callback`;
-
-    if (!googleClientId || !googleClientSecret) {
-      res.redirect('/?auth_status=error&error_msg=Google+Client+Secret+not+configured+in+server+environment');
-      return;
-    }
-
-    // Exchange authorization code with Google OAuth token service
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: googleClientId,
-        client_secret: googleClientSecret,
-        redirect_uri: redirectUri,
-        grant_type: 'authorization_code',
-      }),
-    });
-
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok || !tokenData.access_token) {
-      const errMsg = tokenData.error_description || tokenData.error || 'Failed to exchange authorization code with Google';
-      console.warn('[Google OAuth Callback] Token exchange failed:', errMsg);
-      res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(errMsg)}`);
-      return;
-    }
-
-    // Retrieve user profile from Google UserInfo endpoint
-    const userinfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` },
-    });
-    const userinfo = await userinfoRes.json();
-
-    if (!userinfo.email) {
-      res.redirect('/?auth_status=error&error_msg=Google+account+did+not+provide+an+email+address');
-      return;
-    }
-
-    const result = db.findOrCreateGoogleCustomer({
-      email: userinfo.email,
-      name: userinfo.name || userinfo.email.split('@')[0],
-      googleId: userinfo.sub,
-      picture: userinfo.picture,
-    });
-
-    if (!result.success || !result.customer) {
-      res.redirect('/?auth_status=error&error_msg=Failed+to+establish+customer+session');
-      return;
-    }
-
-    // Redirect back to customer portal with active authenticated token
-    res.redirect(`/?auth_status=success&auth_token=${encodeURIComponent(result.token || '')}&customer_id=${encodeURIComponent(result.customer.id)}`);
-  } catch (err: any) {
-    console.error('[Google OAuth Callback] Unexpected handler error:', err);
-    res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(err.message || 'Google authentication encountered an error')}`);
-  }
-});
-
 // 1. Forgot Password: Generate 6-digit verification code & send email if configured
 app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
   const { email } = req.body;
@@ -969,15 +889,15 @@ app.get('/api/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/orders/create', (req: Request, res: Response) => {
-  const { customerId, customerName, providerId, serviceType, productName, amount, providerCost, details } = req.body;
+app.post('/api/orders/create', async (req: Request, res: Response) => {
+  const { customerId, customerName, providerId, serviceType, productName, amount, providerCost, walletBalance, details } = req.body;
 
   if (!serviceType || !productName) {
     res.status(400).json({ error: 'Missing required order parameters.' });
     return;
   }
 
-  // Server Routing Resolution according to Requirement 7:
+  // Server Routing Resolution:
   // USA Numbers:
   // Server 1 & 2 -> BenOTP USA
   // Server 3, 4, 5 -> Nova Solution USA
@@ -994,7 +914,6 @@ app.post('/api/orders/create', (req: Request, res: Response) => {
   ) {
     resolvedProvider = 'nova';
   } else if (serviceType === 'Log Accounts') {
-    // Resolve provider for logs based on catalog
     const logOffer = db.getLogOffers().find((l) => l.productName === productName || l.id === details?.offerId);
     if (logOffer) {
       resolvedProvider = logOffer.providerId;
@@ -1025,14 +944,21 @@ app.post('/api/orders/create', (req: Request, res: Response) => {
     }
   }
 
-  const result = db.createOrder({
-    customerId: customerId || 'CUST-1001',
+  const clientWalletBalance = typeof walletBalance === 'number' && !isNaN(walletBalance)
+    ? walletBalance
+    : Number(req.headers['x-wallet-balance']);
+
+  const activeCustomerId = customerId || (req.headers['x-customer-id'] as string) || 'CUST-1001';
+
+  const result = await db.createOrder({
+    customerId: activeCustomerId,
     customerName: customerName || 'Customer',
     providerId: resolvedProvider,
     serviceType,
     productName,
     amount: verifiedAmount,
     providerCost: verifiedCost,
+    walletBalance: !isNaN(clientWalletBalance) ? clientWalletBalance : undefined,
     details: {
       ...details,
       serverName: serverName || (serviceType === 'USA Numbers' ? 'USA Server 1' : 'Server 1'),
@@ -1055,18 +981,36 @@ app.post('/api/orders/create', (req: Request, res: Response) => {
     delivery: result.order.delivery,
     createdAt: result.order.createdAt,
     serverRoute: result.order.details?.serverName || 'Verified Server',
+    newWalletBalance: result.newBalance,
   };
 
   res.json(customerSafeOrder);
 });
 
-app.post('/api/orders/:id/refund', requireAdminAuth, (req: Request, res: Response) => {
+// Order Refund / Cancellation Endpoint
+// Accessible by Admin OR by customer for unreceived SMS numbers (Auto-Refund)
+app.post('/api/orders/:id/refund', (req: Request, res: Response) => {
   const { id } = req.params;
-  const actor = req.headers['x-admin-actor'] as string || 'Admin';
+  const actor = (req.headers['x-admin-actor'] as string) || 'Customer Auto-Refund';
+  const order = db.getOrders().find((o) => o.id === id);
+
+  if (!order) {
+    res.status(404).json({ success: false, error: 'Order not found.' });
+    return;
+  }
+
+  const isAdmin = isValidAdminRequest(req);
+  const isPendingSms = order.status === 'Waiting for SMS' || order.delivery?.smsCode === 'Waiting for SMS...' || !order.delivery?.smsCode;
+
+  // Customers can auto-refund their pending virtual numbers if SMS was not yet received
+  if (!isAdmin && !isPendingSms && order.status !== 'Pending') {
+    res.status(403).json({ success: false, error: 'Completed or fulfilled orders require administrative review for refunds.' });
+    return;
+  }
 
   const result = db.refundOrder(id, actor);
   if (!result.success) {
-    res.status(400).json({ error: result.message });
+    res.status(400).json({ success: false, error: result.message });
     return;
   }
 
@@ -1231,19 +1175,136 @@ app.get('/api/orders/:id/sms', (req: Request, res: Response) => {
     return;
   }
 
+  // If order already has a received SMS code, return it instantly
+  if (
+    order.delivery?.smsCode && 
+    order.delivery.smsCode !== 'Waiting for SMS...' && 
+    order.delivery.smsCode.trim() !== ''
+  ) {
+    res.json({
+      orderId: order.id,
+      phoneNumber: order.delivery.phoneNumber,
+      smsCode: order.delivery.smsCode,
+      fullSms: order.delivery.fullSms,
+      sender: order.delivery.sender || 'Service',
+      status: 'Received',
+      receivedAt: order.delivery.receivedAt,
+    });
+    return;
+  }
+
+  // Check or deliver via ProviderService
+  const force = req.query.force === 'true';
+  const provider = db.getProvider(order.providerId) || db.getProviders()[0];
+  const smsResult = ProviderService.checkSms(provider, order, force);
+
+  if (smsResult.smsCode) {
+    if (!order.delivery) order.delivery = {};
+    order.delivery.smsCode = smsResult.smsCode;
+    order.delivery.fullSms = smsResult.fullSms;
+    order.delivery.sender = smsResult.sender;
+    order.delivery.receivedAt = smsResult.receivedAt || new Date().toISOString();
+    order.delivery.status = 'Delivered';
+    order.status = 'Completed';
+    db.scheduleSave();
+  }
+
   res.json({
     orderId: order.id,
     phoneNumber: order.delivery?.phoneNumber,
-    smsCode: order.delivery?.smsCode,
-    fullSms: order.delivery?.fullSms,
+    smsCode: order.delivery?.smsCode || null,
+    fullSms: order.delivery?.fullSms || null,
+    sender: order.delivery?.sender || null,
     status: order.delivery?.smsCode ? 'Received' : 'Waiting for SMS',
+    receivedAt: order.delivery?.receivedAt,
   });
 });
 
+// Real-Time Webhook for incoming SMS from providers (BenOTP, Nova, etc.)
+app.post('/api/webhooks/sms', (req: Request, res: Response) => {
+  const { phoneNumber, number, sms, fullSms, code, smsCode, orderId } = req.body;
+  const targetPhone = phoneNumber || number;
+  const targetCode = code || smsCode;
+  const targetSms = fullSms || sms;
+
+  const orders = db.getOrders();
+  const order = orders.find((o) => 
+    (orderId && o.id === orderId) || 
+    (targetPhone && o.delivery?.phoneNumber && o.delivery.phoneNumber.replace(/[^\d]/g, '') === targetPhone.replace(/[^\d]/g, ''))
+  );
+
+  if (order) {
+    if (!order.delivery) order.delivery = {};
+    if (targetCode) order.delivery.smsCode = targetCode;
+    if (targetSms) order.delivery.fullSms = targetSms;
+    order.delivery.receivedAt = new Date().toISOString();
+    order.delivery.status = 'Delivered';
+    order.status = 'Completed';
+    db.scheduleSave();
+    res.json({ success: true, orderId: order.id, message: 'SMS received and assigned to order.' });
+    return;
+  }
+
+  res.status(404).json({ success: false, error: 'Matching active order not found.' });
+});
+
+// Wallet Balance Synchronization Endpoint
+app.post('/api/wallet/sync', (req: Request, res: Response) => {
+  const customerId = (req.headers['x-customer-id'] as string) || req.body.customerId || 'CUST-1001';
+  const balance = Number(req.body.balance);
+  if (isNaN(balance) || balance < 0) {
+    res.status(400).json({ success: false, error: 'Valid numerical balance is required.' });
+    return;
+  }
+  const updatedBalance = db.syncCustomerWallet(customerId, balance, 'Customer Session Sync');
+  res.json({ success: true, balance: updatedBalance, wallet: db.getWallet() });
+});
+
+// Wallet Balance Crediting Endpoint
+app.post('/api/wallet/credit', (req: Request, res: Response) => {
+  const customerId = (req.headers['x-customer-id'] as string) || req.body.customerId || 'CUST-1001';
+  const amount = Number(req.body.amount);
+  const description = req.body.description || 'Wallet Deposit';
+  if (isNaN(amount) || amount <= 0) {
+    res.status(400).json({ success: false, error: 'Valid positive deposit amount required.' });
+    return;
+  }
+
+  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
+  cust.walletBalance += amount;
+  cust.totalDeposited += amount;
+  cust.lastActive = new Date().toISOString();
+  db.updateWallet({ balance: cust.walletBalance });
+
+  const tx: Transaction = {
+    id: `tx-${Date.now()}`,
+    reference: `SL-DEP-${Math.floor(10000 + Math.random() * 90000)}`,
+    service: 'Wallet Deposit',
+    description,
+    amount,
+    type: 'credit',
+    status: 'Successful',
+    date: 'Just now',
+    customerId: cust.id,
+  };
+  db.getTransactions().unshift(tx);
+
+  db.addAuditLog({
+    actor: cust.name,
+    action: 'Wallet Credited',
+    category: 'WALLET',
+    details: `Credited ₦${amount.toLocaleString()} [${description}]`,
+    status: 'Success',
+  });
+
+  db.scheduleSave();
+  res.json({ success: true, balance: cust.walletBalance, customer: cust });
+});
+
 // Legacy endpoint compat for modals
-app.post('/api/orders/world-number', (req: Request, res: Response) => {
-  const { countryCode, countryName, serviceName, price } = req.body;
-  const result = db.createOrder({
+app.post('/api/orders/world-number', async (req: Request, res: Response) => {
+  const { countryCode, countryName, serviceName, price, walletBalance } = req.body;
+  const result = await db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'benotp', // default prioritized
@@ -1251,6 +1312,7 @@ app.post('/api/orders/world-number', (req: Request, res: Response) => {
     productName: `${countryName || 'World'} Number (${serviceName})`,
     amount: Number(price || 1200),
     providerCost: Number(price ? price * 0.75 : 900),
+    walletBalance: typeof walletBalance === 'number' ? walletBalance : undefined,
     details: { countryCode, serviceName },
   });
 
@@ -1263,12 +1325,13 @@ app.post('/api/orders/world-number', (req: Request, res: Response) => {
     phoneNumber: result.order.delivery.phoneNumber,
     code: result.order.delivery.smsCode,
     status: 'Waiting',
+    newBalance: result.newBalance,
   });
 });
 
-app.post('/api/orders/usa-number', (req: Request, res: Response) => {
-  const { serviceName, price } = req.body;
-  const result = db.createOrder({
+app.post('/api/orders/usa-number', async (req: Request, res: Response) => {
+  const { serviceName, price, walletBalance } = req.body;
+  const result = await db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'nova',
@@ -1276,6 +1339,7 @@ app.post('/api/orders/usa-number', (req: Request, res: Response) => {
     productName: `USA Number (${serviceName})`,
     amount: Number(price || 1800),
     providerCost: Number(price ? price * 0.75 : 1350),
+    walletBalance: typeof walletBalance === 'number' ? walletBalance : undefined,
     details: { serviceName },
   });
 
@@ -1288,6 +1352,7 @@ app.post('/api/orders/usa-number', (req: Request, res: Response) => {
     phoneNumber: result.order.delivery.phoneNumber,
     code: result.order.delivery.smsCode,
     status: 'Waiting',
+    newBalance: result.newBalance,
   });
 });
 
@@ -1432,7 +1497,7 @@ app.get('/api/boosting/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/boosting/purchase', (req: Request, res: Response) => {
+app.post('/api/boosting/purchase', async (req: Request, res: Response) => {
   const { server, itemId, quantity, targetLink } = req.body;
   if (!itemId || !quantity || !targetLink) {
     res.status(400).json({ error: 'Missing required boosting campaign parameters.' });
@@ -1449,7 +1514,7 @@ app.post('/api/boosting/purchase', (req: Request, res: Response) => {
   const totalAmount = Math.max(500, Math.round((Number(quantity) / 1000) * ratePer1k));
   const providerCost = Math.round(totalAmount * 0.7);
 
-  const result = db.createOrder({
+  const result = await db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'rakib',
@@ -1593,7 +1658,7 @@ app.get('/api/proxies/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/proxies/purchase', (req: Request, res: Response) => {
+app.post('/api/proxies/purchase', async (req: Request, res: Response) => {
   const { planId, proxyType, gateId, quantity, location, duration } = req.body;
   const customerId = (req.body.customerId as string) || (req.headers['x-customer-id'] as string) || 'CUST-1001';
   const cust = db.getCustomer(customerId) || db.getCustomers()[0];
@@ -1623,7 +1688,7 @@ app.post('/api/proxies/purchase', (req: Request, res: Response) => {
   const proxyHost = pType === 'mobile' ? '162.254.120.55' : (pType === 'datacenter' ? '198.51.100.72' : '162.254.120.44');
   const proxyEndpoint = `${proxyHost}:${proxyPort}:${proxyUser}:${proxyPass}`;
 
-  const result = db.createOrder({
+  const result = await db.createOrder({
     customerId: cust.id,
     customerName: cust.name,
     providerId: 'nova',
@@ -1775,7 +1840,7 @@ app.get('/api/esim/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/esim/purchase', (req: Request, res: Response) => {
+app.post('/api/esim/purchase', async (req: Request, res: Response) => {
   const { productId, server, country, email } = req.body;
   const price = 4500;
   const providerCost = 3150;
@@ -1783,7 +1848,7 @@ app.post('/api/esim/purchase', (req: Request, res: Response) => {
   const orderRef = `SL-ESIM-${Date.now().toString().slice(-6)}`;
   const activationCode = `LPA:1$smdp.stevelogs.com$${orderRef}`;
 
-  const result = db.createOrder({
+  const result = await db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'nova',
@@ -1914,7 +1979,7 @@ app.get('/api/giftcards/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/giftcards/purchase', (req: Request, res: Response) => {
+app.post('/api/giftcards/purchase', async (req: Request, res: Response) => {
   const { productId, countryIso, denomination, recipientEmail, recipientPhone } = req.body;
   const denom = Number(denomination) || 25;
   const rate = 1680;
@@ -1922,7 +1987,7 @@ app.post('/api/giftcards/purchase', (req: Request, res: Response) => {
   const providerCost = Math.round(totalNgn * 0.9);
   const code = `SL-GC-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
-  const result = db.createOrder({
+  const result = await db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'nova',

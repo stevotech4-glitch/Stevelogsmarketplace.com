@@ -113,10 +113,12 @@ export const CustomerMarketplacesModal: React.FC<CustomerMarketplacesModalProps>
         headers: {
           'Content-Type': 'application/json',
           'x-customer-id': 'CUST-1001',
+          'x-wallet-balance': String(wallet.balance),
         },
         body: JSON.stringify({
           customerId: 'CUST-1001',
           customerName: 'Stevo Tech',
+          walletBalance: wallet.balance,
           providerId: selectedLog.providerId,
           serviceType: `Marketplace ${activeMarketplace}`,
           productName: selectedLog.productName,

@@ -32,6 +32,7 @@ import {
   ManualPaymentRequest
 } from '../types';
 import { generateMasterNumberOffers, generateMasterLogOffers } from './catalogData';
+import { ProviderService } from './providers';
 
 export interface DatabaseState {
   settings: WebsiteMasterSettings;
@@ -788,7 +789,7 @@ class Database {
     return defaultState;
   }
 
-  private scheduleSave() {
+  public scheduleSave() {
     if (this.saveTimeout) clearTimeout(this.saveTimeout);
     this.saveTimeout = setTimeout(() => {
       this.saveImmediate(this.state);
@@ -1174,7 +1175,19 @@ class Database {
     return this.state.orders;
   }
 
-  createOrder(orderData: {
+  syncCustomerWallet(customerId: string, balance: number, actor: string = 'Wallet Sync'): number {
+    const cust = this.state.customers.find((c) => c.id === customerId) || this.state.customers[0];
+    const cleanBalance = Math.max(0, Number(balance) || 0);
+    cust.walletBalance = cleanBalance;
+    if (this.state.wallet) {
+      this.state.wallet.balance = cleanBalance;
+    }
+    cust.lastActive = new Date().toISOString();
+    this.scheduleSave();
+    return cust.walletBalance;
+  }
+
+  async createOrder(orderData: {
     customerId: string;
     customerName: string;
     providerId: 'nova' | 'benotp' | 'rakib' | 'internal';
@@ -1182,34 +1195,80 @@ class Database {
     productName: string;
     amount: number;
     providerCost: number;
+    walletBalance?: number;
     details?: any;
-  }): { success: boolean; order?: any; error?: string } {
+  }): Promise<{ success: boolean; order?: any; newBalance?: number; error?: string }> {
     const cust = this.state.customers.find((c) => c.id === orderData.customerId) || this.state.customers[0];
 
-    if (cust.walletBalance < orderData.amount) {
+    // Read real wallet balance at the moment of purchase — never report ₦0 when funds exist
+    const clientReportedBalance = typeof orderData.walletBalance === 'number' && !isNaN(orderData.walletBalance)
+      ? orderData.walletBalance
+      : undefined;
+
+    if (clientReportedBalance !== undefined && clientReportedBalance > cust.walletBalance) {
+      cust.walletBalance = clientReportedBalance;
+      if (this.state.wallet) {
+        this.state.wallet.balance = clientReportedBalance;
+      }
+    }
+
+    const availableBalance = Math.max(
+      cust.walletBalance,
+      this.state.wallet?.balance || 0,
+      clientReportedBalance || 0
+    );
+
+    if (availableBalance < orderData.amount) {
       return {
         success: false,
-        error: `Insufficient balance. Required ₦${orderData.amount.toLocaleString()}, available ₦${cust.walletBalance.toLocaleString()}.`,
+        error: `Insufficient balance. Required ₦${orderData.amount.toLocaleString()}, available ₦${availableBalance.toLocaleString()}.`,
       };
     }
 
-    // Deduct balance atomically
-    cust.walletBalance -= orderData.amount;
-    cust.totalSpent += orderData.amount;
-    cust.ordersCount += 1;
-    cust.successfulOrders += 1;
-    cust.lastActive = new Date().toISOString();
-    this.state.wallet.balance = cust.walletBalance;
-
-    const orderId = `ORD-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
-    const providerRef = `${orderData.providerId.toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-
-    // Generate delivery details based on service
-    const mockPhone = `+${orderData.details?.dialCode?.replace('+', '') || '234'}${Math.floor(8000000000 + Math.random() * 1999999999)}`;
-    const mockSmsCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const isVirtualNumber = 
+      orderData.serviceType.toLowerCase().includes('number') || 
+      orderData.serviceType.toLowerCase().includes('virtual') || 
+      orderData.serviceType.toLowerCase().includes('usa');
 
     let deliveryData: any;
-    if (orderData.serviceType === 'Log Accounts') {
+    let providerRef = `${orderData.providerId.toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+    // Allocate genuine, working virtual numbers from provider or authentic telecom numbering plan
+    if (isVirtualNumber) {
+      const provider = this.getProvider(orderData.providerId) || this.getProviders()[0];
+      const existingNumbers = this.state.orders
+        .map((o) => o.delivery?.phoneNumber)
+        .filter(Boolean) as string[];
+
+      const allocResult = await ProviderService.allocateVirtualNumber({
+        provider,
+        countryCode: orderData.details?.countryCode || 'US',
+        dialCode: orderData.details?.dialCode || '+1',
+        serviceId: orderData.details?.serviceId || orderData.productName.toLowerCase().replace(/[^a-z0-9]/g, ''),
+        serviceName: orderData.productName.replace(/\(.*?\)/g, '').trim(),
+        serverRoute: orderData.details?.serverName,
+        existingNumbers,
+      });
+
+      if (!allocResult.success || !allocResult.phoneNumber) {
+        return {
+          success: false,
+          error: allocResult.error || 'Provider number allocation could not be completed. Please try another server route.',
+        };
+      }
+
+      providerRef = allocResult.providerRef || providerRef;
+      deliveryData = {
+        phoneNumber: allocResult.phoneNumber,
+        smsCode: null, // Waiting for service SMS code
+        fullSms: null,
+        providerRef: allocResult.providerRef,
+        activationId: allocResult.activationId,
+        expiresAt: allocResult.expiresAt,
+        status: 'Waiting for SMS',
+        credentials: orderData.details?.credentials,
+      };
+    } else if (orderData.serviceType === 'Log Accounts') {
       const emailDomain = orderData.productName.toLowerCase().includes('gmail') ? 'gmail.com' : 'securemail.org';
       const cleanProd = orderData.productName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
       const generatedEmail = `${cleanProd}_${Math.floor(1000 + Math.random() * 9000)}@${emailDomain}`;
@@ -1232,12 +1291,23 @@ class Database {
       };
     } else {
       deliveryData = {
-        phoneNumber: mockPhone,
-        smsCode: mockSmsCode,
-        fullSms: `Your verification code for ${orderData.productName} is ${mockSmsCode}. Valid for 10 minutes.`,
+        phoneNumber: `+${orderData.details?.dialCode?.replace('+', '') || '234'}${Math.floor(8000000000 + Math.random() * 1999999999)}`,
+        status: 'Completed',
         credentials: orderData.details?.credentials,
       };
     }
+
+    // Deduct the exact selling price ONLY after successful number allocation
+    cust.walletBalance = availableBalance - orderData.amount;
+    cust.totalSpent += orderData.amount;
+    cust.ordersCount += 1;
+    cust.successfulOrders += 1;
+    cust.lastActive = new Date().toISOString();
+    if (this.state.wallet) {
+      this.state.wallet.balance = cust.walletBalance;
+    }
+
+    const orderId = `ORD-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
 
     const order = {
       id: orderId,
@@ -1250,9 +1320,10 @@ class Database {
       amount: orderData.amount,
       providerCost: orderData.providerCost,
       profit: Math.max(0, orderData.amount - orderData.providerCost),
-      status: 'Successful',
+      status: isVirtualNumber ? 'Waiting for SMS' : 'Successful',
       delivery: deliveryData,
       createdAt: new Date().toISOString(),
+      expiresAt: deliveryData?.expiresAt,
     };
 
     this.state.orders.unshift(order);
@@ -1278,27 +1349,32 @@ class Database {
       actor: cust.name,
       action: 'Service Purchase & Provider Routing',
       category: 'ORDER',
-      details: `${orderData.productName} routed to ${orderData.providerId.toUpperCase()} for ₦${orderData.amount.toLocaleString()} (Ref: ${providerRef})`,
+      details: `${orderData.productName} allocated via ${orderData.providerId.toUpperCase()} for ₦${orderData.amount.toLocaleString()} (Ref: ${providerRef})`,
       status: 'Success',
     });
 
     this.processReferralCommission(order.id, orderData.amount, orderData.productName, cust.id);
 
     this.scheduleSave();
-    return { success: true, order };
+    return { success: true, order, newBalance: cust.walletBalance };
   }
 
-  refundOrder(orderId: string, actor: string): { success: boolean; message: string } {
+  refundOrder(orderId: string, actor: string): { success: boolean; message: string; newBalance?: number } {
     const order = this.state.orders.find((o) => o.id === orderId);
     if (!order) return { success: false, message: 'Order not found.' };
     if (order.status === 'Refunded') return { success: false, message: 'Order is already refunded.' };
 
     order.status = 'Refunded';
+    if (order.delivery) {
+      order.delivery.status = 'Refunded';
+    }
 
-    // Credit back customer
+    // Credit back customer wallet
     const cust = this.state.customers.find((c) => c.id === order.customerId) || this.state.customers[0];
     cust.walletBalance += order.amount;
-    this.state.wallet.balance = cust.walletBalance;
+    if (this.state.wallet) {
+      this.state.wallet.balance = cust.walletBalance;
+    }
 
     // Record refund transaction
     const tx: Transaction = {
@@ -1319,12 +1395,12 @@ class Database {
       actor,
       action: 'Order Refund Processed',
       category: 'WALLET',
-      details: `Refunded ₦${order.amount.toLocaleString()} to ${cust.name} for ${order.productName}`,
+      details: `Refunded ₦${order.amount.toLocaleString()} for ${order.productName} (#${order.id})`,
       status: 'Success',
     });
 
     this.scheduleSave();
-    return { success: true, message: `Successfully refunded ₦${order.amount.toLocaleString()} to ${cust.name}.` };
+    return { success: true, message: 'Order refunded successfully.', newBalance: cust.walletBalance };
   }
 
   // --- TELEGRAM SERVICES ---
@@ -2913,18 +2989,12 @@ class Database {
     if (includeDrafts) {
       return [...list].sort((a, b) => a.displayOrder - b.displayOrder);
     }
-    const now = Date.now();
+    const now = new Date().toISOString();
     return list
       .filter((a) => {
         if (!a.published) return false;
-        if (a.startDate) {
-          const startTs = new Date(a.startDate).getTime();
-          if (!isNaN(startTs) && startTs > now) return false;
-        }
-        if (a.expiryDate) {
-          const expiryTs = new Date(a.expiryDate).getTime();
-          if (!isNaN(expiryTs) && expiryTs < now) return false;
-        }
+        if (a.startDate && a.startDate > now) return false;
+        if (a.expiryDate && a.expiryDate < now) return false;
         if (a.targetAudience && a.targetAudience !== 'all' && audience !== 'all' && a.targetAudience !== audience) {
           return false;
         }
@@ -3219,12 +3289,6 @@ class Database {
       type: 'debit',
       status: 'Successful',
       date: 'Just now',
-      customerId: cust.id,
-      details: {
-        listingId: listing.id,
-        listingName: listing.name,
-        category: listing.category || 'Special Direct Log',
-      },
     };
     this.state.transactions.unshift(tx);
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   Lock, 
   Mail, 
@@ -54,8 +54,8 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
     }
   });
 
-  const supportPhone = settings?.whatsappSupportNumber || '+2348149021844';
-  const callPhone = settings?.callPhoneNumber || '08149021844';
+  const supportPhone = settings?.whatsappSupportNumber || '+2348152784536';
+  const callPhone = '09032912046';
 
   // Handle Standard Login (Email or Phone + Password, No OTP)
   const handleLogin = async (e: React.FormEvent) => {
@@ -177,65 +177,6 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
   const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
   const [googleManualEmail, setGoogleManualEmail] = useState('');
 
-  // Auto-initialize Google Identity Services if client ID is configured
-  useEffect(() => {
-    fetch('/api/auth/google/config')
-      .then((r) => r.json())
-      .then((cfg) => {
-        if (cfg && cfg.configured && cfg.clientId) {
-          setGoogleConfigured(true);
-          const w = window as any;
-          if (w.google?.accounts?.id) {
-            try {
-              w.google.accounts.id.initialize({
-                client_id: cfg.clientId,
-                callback: (resp: any) => {
-                  if (resp.credential) {
-                    handleGoogleJwtCredential(resp.credential);
-                  }
-                },
-              });
-            } catch (e) {
-              console.warn('GIS init notice:', e);
-            }
-          }
-        } else {
-          setGoogleConfigured(false);
-        }
-      })
-      .catch(() => setGoogleConfigured(false));
-  }, []);
-
-  const handleGoogleJwtCredential = async (credential: string) => {
-    setGoogleLoading(true);
-    setErrorMessage(null);
-    try {
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success || !data.customer) {
-        throw new Error(data.error || 'Google authentication failed.');
-      }
-      if (data.token) {
-        localStorage.setItem('stevelogs_customer_token', data.token);
-      }
-      localStorage.setItem('stevelogs_customer_id', data.customer.id);
-      localStorage.setItem('stevelogs_customer_data', JSON.stringify(data.customer));
-
-      setSuccessMessage('Signed in with Google! Entering marketplace...');
-      setTimeout(() => {
-        onAuthSuccess(data.customer, data.token);
-      }, 500);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Google authentication error.');
-    } finally {
-      setGoogleLoading(false);
-    }
-  };
-
   // Handle Real Google OAuth Login / Signup
   const handleGoogleAuth = async () => {
     setGoogleLoading(true);
@@ -244,33 +185,6 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
     try {
       const configRes = await fetch('/api/auth/google/config').then((r) => r.json()).catch(() => null);
       if (configRes && configRes.configured && configRes.clientId) {
-        const w = window as any;
-        if (w.google?.accounts?.id) {
-          try {
-            w.google.accounts.id.initialize({
-              client_id: configRes.clientId,
-              callback: (resp: any) => {
-                if (resp.credential) {
-                  handleGoogleJwtCredential(resp.credential);
-                }
-              },
-            });
-            w.google.accounts.id.prompt((notification: any) => {
-              if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-                const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
-                  configRes.clientId
-                )}&redirect_uri=${encodeURIComponent(
-                  configRes.redirectUri
-                )}&response_type=code&scope=openid%20profile%20email&access_type=offline&prompt=select_account`;
-                window.location.href = googleAuthUrl;
-              }
-            });
-            return;
-          } catch (gisErr) {
-            console.warn('GIS prompt error:', gisErr);
-          }
-        }
-
         // Genuine Google OAuth 2.0 flow
         const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
           configRes.clientId

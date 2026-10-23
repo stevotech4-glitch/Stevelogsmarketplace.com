@@ -18,9 +18,13 @@ import {
   Clock,
   XCircle,
   HelpCircle,
-  ArrowUpRight
+  ArrowUpRight,
+  Building2,
+  Upload,
+  Image as ImageIcon,
+  FileCheck
 } from 'lucide-react';
-import { WebsiteMasterSettings, PaymentRecord } from '../../types';
+import { WebsiteMasterSettings, PaymentRecord, ManualPaymentRequest } from '../../types';
 
 interface AdminPaymentSettingsTabProps {
   settings: WebsiteMasterSettings;
@@ -61,6 +65,27 @@ export const AdminPaymentSettingsTab: React.FC<AdminPaymentSettingsTabProps> = (
     failedCount: 0,
     totalDepositedNgn: 0,
   });
+
+  // Manual Payment Settings State
+  const [manualBankName, setManualBankName] = useState(settings.bankName || 'Moniepoint MFB / Wema Bank');
+  const [manualAccountName, setManualAccountName] = useState(settings.accountName || 'STEVELOGS MARKETPLACE SERVICES');
+  const [manualAccountNumber, setManualAccountNumber] = useState(settings.accountNumber || '8149021844');
+  const [manualInstructions, setManualInstructions] = useState(
+    settings.manualPaymentInstructions ||
+    'Transfer the exact amount to the account details shown above. Take a clear screenshot of the successful transfer receipt and upload it below. Our verification desk operates 24/7 and approves requests within 2 to 5 minutes.'
+  );
+  const [manualMinDeposit, setManualMinDeposit] = useState(settings.manualPaymentMinDeposit || 500);
+  const [manualEnabled, setManualEnabled] = useState(settings.manualPaymentEnabled !== false);
+  const [savingManualSettings, setSavingManualSettings] = useState(false);
+
+  // Manual Payment Requests State
+  const [manualRequests, setManualRequests] = useState<ManualPaymentRequest[]>([]);
+  const [manualRequestsLoading, setManualRequestsLoading] = useState(false);
+  const [manualFilter, setManualFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+  const [selectedReceiptUrl, setSelectedReceiptUrl] = useState<string | null>(null);
+  const [rejectingReq, setRejectingReq] = useState<ManualPaymentRequest | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [actionProcessingId, setActionProcessingId] = useState<string | null>(null);
 
   const getAdminHeaders = (): HeadersInit => {
     const token = sessionStorage.getItem('stevelogs_admin_token') || '';
@@ -140,10 +165,123 @@ export const AdminPaymentSettingsTab: React.FC<AdminPaymentSettingsTabProps> = (
     }
   };
 
+  const loadManualRequests = async () => {
+    setManualRequestsLoading(true);
+    try {
+      const res = await fetch('/api/admin/payments/manual-requests', {
+        headers: getAdminHeaders(),
+      });
+      const data = await res.json();
+      if (data && Array.isArray(data.requests)) {
+        setManualRequests(data.requests);
+      }
+    } catch (err: any) {
+      console.error('Failed to load manual payment requests:', err);
+    } finally {
+      setManualRequestsLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadDiagnostics();
     loadPaymentsLedger();
+    loadManualRequests();
   }, []);
+
+  const handleSaveManualSettings = async () => {
+    setSavingManualSettings(true);
+    try {
+      const res = await fetch('/api/payments/manual-settings', {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          bankName: manualBankName.trim(),
+          accountName: manualAccountName.trim(),
+          accountNumber: manualAccountNumber.trim(),
+          manualPaymentInstructions: manualInstructions.trim(),
+          manualPaymentMinDeposit: Number(manualMinDeposit),
+          manualPaymentEnabled: manualEnabled,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        onSaveSettings({
+          bankName: manualBankName.trim(),
+          accountName: manualAccountName.trim(),
+          accountNumber: manualAccountNumber.trim(),
+          manualPaymentInstructions: manualInstructions.trim(),
+          manualPaymentMinDeposit: Number(manualMinDeposit),
+          manualPaymentEnabled: manualEnabled,
+        });
+        onShowNotice('Manual bank transfer payment settings saved successfully!');
+      } else {
+        onShowNotice('Failed to update manual payment settings.');
+      }
+    } catch (err: any) {
+      onShowNotice('Error saving settings: ' + err.message);
+    } finally {
+      setSavingManualSettings(false);
+    }
+  };
+
+  const handleApproveManualPayment = async (reqItem: ManualPaymentRequest, overrideAmount?: number) => {
+    if (!window.confirm(`Are you sure you want to approve manual deposit of ₦${(overrideAmount || reqItem.amount).toLocaleString()} for ${reqItem.customerName}? This will credit their wallet balance immediately.`)) {
+      return;
+    }
+
+    setActionProcessingId(reqItem.id);
+    try {
+      const res = await fetch(`/api/admin/payments/manual-requests/${encodeURIComponent(reqItem.id)}/approve`, {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          approvedAmount: overrideAmount || reqItem.amount,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        onShowNotice(`Manual payment approved! ₦${(overrideAmount || reqItem.amount).toLocaleString()} credited to ${reqItem.customerName}'s wallet.`);
+        loadManualRequests();
+        loadPaymentsLedger();
+      } else {
+        onShowNotice(`Approval failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      onShowNotice(`Error approving payment: ${err.message}`);
+    } finally {
+      setActionProcessingId(null);
+    }
+  };
+
+  const handleRejectManualPayment = async () => {
+    if (!rejectingReq) return;
+    setActionProcessingId(rejectingReq.id);
+    try {
+      const res = await fetch(`/api/admin/payments/manual-requests/${encodeURIComponent(rejectingReq.id)}/reject`, {
+        method: 'POST',
+        headers: getAdminHeaders(),
+        body: JSON.stringify({
+          reason: rejectReason.trim() || 'Payment could not be verified by administration.',
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        onShowNotice(`Manual payment [Ref: ${rejectingReq.reference}] has been rejected.`);
+        setRejectingReq(null);
+        setRejectReason('');
+        loadManualRequests();
+      } else {
+        onShowNotice(`Rejection failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      onShowNotice(`Error rejecting payment: ${err.message}`);
+    } finally {
+      setActionProcessingId(null);
+    }
+  };
 
   const handleSaveCredentials = () => {
     const updates: Partial<WebsiteMasterSettings> = {
@@ -172,6 +310,16 @@ export const AdminPaymentSettingsTab: React.FC<AdminPaymentSettingsTabProps> = (
     if (paymentFilter === 'all') return true;
     return p.status === paymentFilter;
   });
+
+  const filteredManualRequests = manualRequests.filter((r) => {
+    if (manualFilter === 'all') return true;
+    if (manualFilter === 'pending') return r.status === 'Pending Approval';
+    if (manualFilter === 'approved') return r.status === 'Approved';
+    if (manualFilter === 'rejected') return r.status === 'Rejected';
+    return true;
+  });
+
+  const pendingManualCount = manualRequests.filter((r) => r.status === 'Pending Approval').length;
 
   return (
     <div className="space-y-6">
@@ -223,6 +371,425 @@ export const AdminPaymentSettingsTab: React.FC<AdminPaymentSettingsTabProps> = (
           </button>
         </div>
       </div>
+
+      {/* ======================================================== */}
+      {/* 1. MANUAL PAYMENT REQUESTS & VERIFICATION DESK           */}
+      {/* ======================================================== */}
+      <div className="p-6 rounded-2xl bg-[#0f172a] border border-amber-500/30 shadow-xl space-y-4 relative overflow-hidden">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-amber-400 text-slate-950 flex items-center justify-center font-black">
+                <Building2 className="w-4 h-4" />
+              </div>
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                Manual Bank Transfer Requests
+                {pendingManualCount > 0 ? (
+                  <span className="text-xs font-mono font-black px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 animate-pulse">
+                    {pendingManualCount} Pending Review
+                  </span>
+                ) : (
+                  <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
+                    0 Pending
+                  </span>
+                )}
+              </h3>
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              Verify customer payment screenshots, approve atomic wallet crediting, or reject invalid transfers.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Filter Pills */}
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+              {(['all', 'pending', 'approved', 'rejected'] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setManualFilter(f)}
+                  className={`px-3 py-1 rounded-lg font-bold capitalize transition-colors cursor-pointer ${
+                    manualFilter === f
+                      ? 'bg-amber-400 text-slate-950 shadow-xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {f === 'pending' ? 'Pending' : f}
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={loadManualRequests}
+              disabled={manualRequestsLoading}
+              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 cursor-pointer"
+              title="Refresh Requests"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${manualRequestsLoading ? 'animate-spin text-amber-400' : ''}`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Requests Table */}
+        <div className="overflow-x-auto rounded-xl border border-slate-800">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-slate-950 text-slate-400 uppercase font-mono text-[10px]">
+              <tr>
+                <th className="p-3">Reference / Date</th>
+                <th className="p-3">Customer</th>
+                <th className="p-3">Amount</th>
+                <th className="p-3">Bank Reference / Notes</th>
+                <th className="p-3">Receipt Screenshot</th>
+                <th className="p-3">Status</th>
+                <th className="p-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800 bg-slate-900/40 text-slate-300">
+              {filteredManualRequests.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="p-6 text-center text-slate-500">
+                    No manual bank transfer requests found under "{manualFilter}".
+                  </td>
+                </tr>
+              ) : (
+                filteredManualRequests.map((req) => (
+                  <tr key={req.id} className="hover:bg-slate-800/40">
+                    <td className="p-3 font-mono">
+                      <span className="font-bold text-white block text-[11px]">{req.reference}</span>
+                      <span className="text-[10px] text-slate-500 font-normal">
+                        {new Date(req.createdAt).toLocaleString([], {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <span className="font-bold text-white block">{req.customerName}</span>
+                      <span className="text-[10px] text-slate-400 font-mono block">{req.customerEmail}</span>
+                      <span className="text-[10px] text-slate-500 font-mono">ID: {req.customerId}</span>
+                    </td>
+                    <td className="p-3 font-mono font-black text-amber-300 text-sm">
+                      ₦{req.amount.toLocaleString()}
+                    </td>
+                    <td className="p-3 text-[11px] max-w-xs">
+                      {req.transferReference ? (
+                        <span className="font-mono bg-slate-950 px-2 py-0.5 rounded text-slate-200 border border-slate-800 block truncate">
+                          {req.transferReference}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 italic">Not provided</span>
+                      )}
+                    </td>
+                    <td className="p-3">
+                      {req.receiptUrl ? (
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={req.receiptUrl}
+                            alt="Receipt"
+                            className="w-9 h-9 object-cover rounded-lg border border-slate-700 cursor-pointer hover:opacity-80"
+                            onClick={() => setSelectedReceiptUrl(req.receiptUrl || null)}
+                          />
+                          <button
+                            onClick={() => setSelectedReceiptUrl(req.receiptUrl || null)}
+                            className="px-2 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 font-bold text-[10px] border border-blue-500/30 cursor-pointer flex items-center gap-1"
+                          >
+                            <ImageIcon className="w-3 h-3" />
+                            <span>View</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-slate-500">No image</span>
+                      )}
+                    </td>
+                    <td className="p-3">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                          req.status === 'Approved'
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : req.status === 'Pending Approval'
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                        }`}
+                      >
+                        {req.status}
+                      </span>
+                      {req.status === 'Rejected' && req.rejectionReason && (
+                        <span className="block text-[10px] text-rose-400 mt-0.5 max-w-xs truncate" title={req.rejectionReason}>
+                          {req.rejectionReason}
+                        </span>
+                      )}
+                      {req.status === 'Approved' && req.approvedBy && (
+                        <span className="block text-[9px] text-emerald-400 font-mono mt-0.5">
+                          By: {req.approvedBy}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-3 text-right">
+                      {req.status === 'Pending Approval' ? (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => handleApproveManualPayment(req)}
+                            disabled={actionProcessingId === req.id}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-[11px] shadow-sm cursor-pointer disabled:opacity-50 transition-all"
+                            title="Approve and Credit Exact Amount to Wallet"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => {
+                              setRejectingReq(req);
+                              setRejectReason('');
+                            }}
+                            disabled={actionProcessingId === req.id}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 font-bold text-[11px] cursor-pointer disabled:opacity-50 transition-all"
+                            title="Reject Payment"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-slate-500 font-mono">Completed</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ======================================================== */}
+      {/* 2. MANUAL PAYMENT SETTINGS (ADMIN CONFIGURABLE)          */}
+      {/* ======================================================== */}
+      <div className="p-6 rounded-2xl bg-[#0f172a] border border-slate-800 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div>
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Building2 className="w-5 h-5 text-amber-400" />
+              Manual Bank Transfer Settings
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Configure the bank account details displayed to customers on the wallet funding page.
+            </p>
+          </div>
+
+          {/* Enabled Toggle */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-300 font-bold">Manual Deposits:</span>
+            <button
+              onClick={() => setManualEnabled(!manualEnabled)}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                manualEnabled ? 'bg-amber-400' : 'bg-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-slate-950 transition-transform ${
+                  manualEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+            <span className={`text-xs font-bold ${manualEnabled ? 'text-amber-400' : 'text-slate-500'}`}>
+              {manualEnabled ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+          {/* Bank Name */}
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+              Bank Name *
+            </label>
+            <input
+              type="text"
+              value={manualBankName}
+              onChange={(e) => setManualBankName(e.target.value)}
+              placeholder="e.g. Moniepoint MFB / Wema Bank"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-xs focus:border-amber-400 outline-none"
+            />
+          </div>
+
+          {/* Account Number */}
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+              Account Number *
+            </label>
+            <input
+              type="text"
+              value={manualAccountNumber}
+              onChange={(e) => setManualAccountNumber(e.target.value)}
+              placeholder="e.g. 8149021844"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-amber-300 font-mono font-black text-xs focus:border-amber-400 outline-none"
+            />
+          </div>
+
+          {/* Account Name */}
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+              Account Name *
+            </label>
+            <input
+              type="text"
+              value={manualAccountName}
+              onChange={(e) => setManualAccountName(e.target.value)}
+              placeholder="e.g. STEVELOGS MARKETPLACE SERVICES"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-bold text-xs focus:border-amber-400 outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+          {/* Minimum Deposit */}
+          <div>
+            <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+              Minimum Permitted Wallet Deposit (₦)
+            </label>
+            <input
+              type="number"
+              min={100}
+              step={50}
+              value={manualMinDeposit}
+              onChange={(e) => setManualMinDeposit(Number(e.target.value))}
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:border-amber-400 outline-none"
+            />
+          </div>
+
+          {/* Instructions */}
+          <div className="sm:col-span-2">
+            <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+              Additional Payment Instructions
+            </label>
+            <textarea
+              rows={2}
+              value={manualInstructions}
+              onChange={(e) => setManualInstructions(e.target.value)}
+              placeholder="Instructions displayed to customers when paying..."
+              className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:border-amber-400 outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <button
+            onClick={handleSaveManualSettings}
+            disabled={savingManualSettings}
+            className="px-6 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs shadow-lg transition-transform active:scale-95 cursor-pointer disabled:opacity-50"
+          >
+            {savingManualSettings ? 'Saving...' : 'Save Manual Payment Settings'}
+          </button>
+        </div>
+      </div>
+
+      {/* ======================================================== */}
+      {/* RECEIPT PREVIEW MODAL                                    */}
+      {/* ======================================================== */}
+      {selectedReceiptUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+          onClick={() => setSelectedReceiptUrl(null)}
+        >
+          <div
+            className="relative max-w-xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-4 overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+              <span className="text-sm font-bold text-white flex items-center gap-2">
+                <ImageIcon className="w-4 h-4 text-amber-400" />
+                Customer Payment Receipt Proof
+              </span>
+              <button
+                onClick={() => setSelectedReceiptUrl(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="py-4 flex justify-center">
+              <img
+                src={selectedReceiptUrl}
+                alt="Receipt proof"
+                className="max-h-[70vh] rounded-2xl object-contain border border-slate-800"
+              />
+            </div>
+            <div className="flex justify-end pt-2">
+              <a
+                href={selectedReceiptUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5"
+              >
+                <span>Open Full Size in New Tab</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* REJECT REASON MODAL                                      */}
+      {/* ======================================================== */}
+      {rejectingReq && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+          onClick={() => setRejectingReq(null)}
+        >
+          <div
+            className="relative max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-5 overflow-hidden shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+              <span className="text-sm font-bold text-white flex items-center gap-2">
+                <XCircle className="w-4 h-4 text-rose-400" />
+                Reject Payment Request
+              </span>
+              <button
+                onClick={() => setRejectingReq(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Rejecting request for <span className="font-bold text-white">{rejectingReq.customerName}</span> (₦{rejectingReq.amount.toLocaleString()}).
+            </p>
+
+            <div>
+              <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                Reason for Rejection (Displayed to customer)
+              </label>
+              <textarea
+                rows={3}
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. Transfer receipt does not match account records, or transfer not received."
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs outline-none focus:border-rose-400"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setRejectingReq(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRejectManualPayment}
+                disabled={actionProcessingId === rejectingReq.id}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs"
+              >
+                Confirm Rejection
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Connection Diagnostics Card */}
       <div className="p-5 rounded-2xl bg-[#0f172a] border border-slate-800 space-y-4">

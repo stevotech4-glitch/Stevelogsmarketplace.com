@@ -26,9 +26,12 @@
     "maxDeposit": 5000000,
     "minPurchase": 200,
     "maxPurchase": 1000000,
-    "bankName": "",
-    "accountNumber": "",
-    "accountName": "",
+    "bankName": "Moniepoint MFB / Wema Bank",
+    "accountNumber": "8149021844",
+    "accountName": "STEVELOGS MARKETPLACE SERVICES",
+    "manualPaymentEnabled": true,
+    "manualPaymentInstructions": "Transfer the exact amount to the account details shown above. Take a clear screenshot of the successful transfer receipt and upload it below. Our verification desk operates 24/7 and approves requests within 2 to 5 minutes.",
+    "manualPaymentMinDeposit": 500,
     "termsOfService": "Stevelogs Terms: Digital products delivered immediately upon confirmed payment. Unreceived SMS within validity window are fully refundable.",
     "privacyPolicy": "Your account info and transactions are encrypted and confidential. We never share customer data with third parties.",
     "adminPasscodeHash": "1755ae3373f28113d7b5b6b8a1c0c9fe2020ecfc26742418ca8bcbfbfb5ba875",
@@ -57028,5 +57031,6 @@
       "updatedAt": "2026-10-23T07:03:10.673Z"
     }
   ],
-  "specialOrders": []
+  "specialOrders": [],
+  "manualPaymentRequests": []
 }

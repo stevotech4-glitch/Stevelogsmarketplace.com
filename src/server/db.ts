@@ -28,7 +28,8 @@ import {
   AnnouncementItem,
   SpecialMarketplaceListing,
   PublicSpecialListing,
-  SpecialMarketplaceOrder
+  SpecialMarketplaceOrder,
+  ManualPaymentRequest
 } from '../types';
 import { generateMasterNumberOffers, generateMasterLogOffers } from './catalogData';
 
@@ -57,6 +58,7 @@ export interface DatabaseState {
   announcements: AnnouncementItem[];
   specialListings: SpecialMarketplaceListing[];
   specialOrders: SpecialMarketplaceOrder[];
+  manualPaymentRequests: ManualPaymentRequest[];
 }
 
 const DB_FILE_PATH = path.resolve(process.cwd(), 'data', 'stevelogs_db.json');
@@ -102,9 +104,12 @@ const INITIAL_SETTINGS: WebsiteMasterSettings = {
   maxDeposit: 5000000,
   minPurchase: 200,
   maxPurchase: 1000000,
-  bankName: '',
-  accountNumber: '',
-  accountName: '',
+  bankName: 'Moniepoint MFB / Wema Bank',
+  accountNumber: '8149021844',
+  accountName: 'STEVELOGS MARKETPLACE SERVICES',
+  manualPaymentEnabled: true,
+  manualPaymentInstructions: 'Transfer the exact amount to the account details shown above. Take a clear screenshot of the successful transfer receipt and upload it below. Our verification desk operates 24/7 and approves requests within 2 to 5 minutes.',
+  manualPaymentMinDeposit: 500,
   termsOfService: 'Stevelogs Terms: Digital products delivered immediately upon confirmed payment. Unreceived SMS within validity window are fully refundable.',
   privacyPolicy: 'Your account info and transactions are encrypted and confidential. We never share customer data with third parties.',
   adminPasscodeHash: defaultAdminPasscode.hash,
@@ -710,9 +715,22 @@ class Database {
             ? parsed.specialListings
             : INITIAL_SPECIAL_LISTINGS,
           specialOrders: parsed.specialOrders || [],
+          manualPaymentRequests: parsed.manualPaymentRequests || [],
         };
 
-        if (existingNumbers.length < 500 || !hasSignal || !parsed.giftOrders || !parsed.videoTutorials || !parsed.announcements || !parsed.specialListings) {
+        if (
+          !state.settings.bankName ||
+          state.settings.manualPaymentEnabled === undefined
+        ) {
+          state.settings.bankName = state.settings.bankName || INITIAL_SETTINGS.bankName;
+          state.settings.accountNumber = state.settings.accountNumber || INITIAL_SETTINGS.accountNumber;
+          state.settings.accountName = state.settings.accountName || INITIAL_SETTINGS.accountName;
+          state.settings.manualPaymentEnabled = state.settings.manualPaymentEnabled ?? INITIAL_SETTINGS.manualPaymentEnabled;
+          state.settings.manualPaymentInstructions = state.settings.manualPaymentInstructions || INITIAL_SETTINGS.manualPaymentInstructions;
+          state.settings.manualPaymentMinDeposit = state.settings.manualPaymentMinDeposit || INITIAL_SETTINGS.manualPaymentMinDeposit;
+        }
+
+        if (existingNumbers.length < 500 || !hasSignal || !parsed.giftOrders || !parsed.videoTutorials || !parsed.announcements || !parsed.specialListings || !parsed.manualPaymentRequests) {
           this.saveImmediate(state);
         }
 
@@ -757,6 +775,7 @@ class Database {
       announcements: INITIAL_ANNOUNCEMENTS,
       specialListings: INITIAL_SPECIAL_LISTINGS,
       specialOrders: [],
+      manualPaymentRequests: [],
     };
 
     this.saveImmediate(defaultState);
@@ -3121,6 +3140,309 @@ class Database {
         'Video Tutorials Library',
       ],
     };
+  }
+  // ==========================================
+  // MANUAL BANK TRANSFER PAYMENT SYSTEM
+  // ==========================================
+  getManualPaymentSettings(): {
+    enabled: boolean;
+    bankName: string;
+    accountNumber: string;
+    accountName: string;
+    instructions: string;
+    minDeposit: number;
+    maxDeposit: number;
+    currency: string;
+    currencySymbol: string;
+  } {
+    const s = this.state.settings;
+    return {
+      enabled: s.manualPaymentEnabled !== false,
+      bankName: s.bankName || 'Moniepoint MFB / Wema Bank',
+      accountNumber: s.accountNumber || '8149021844',
+      accountName: s.accountName || 'STEVELOGS MARKETPLACE SERVICES',
+      instructions: s.manualPaymentInstructions || 'Transfer the exact amount to the account details shown above. Take a clear screenshot of the successful transfer receipt and upload it below. Our verification desk operates 24/7 and approves requests within 2 to 5 minutes.',
+      minDeposit: s.manualPaymentMinDeposit || s.minDeposit || 500,
+      maxDeposit: s.maxDeposit || 5000000,
+      currency: s.currency || 'NGN',
+      currencySymbol: s.currencySymbol || '₦',
+    };
+  }
+
+  updateManualPaymentSettings(
+    updates: Partial<{
+      bankName: string;
+      accountNumber: string;
+      accountName: string;
+      manualPaymentInstructions: string;
+      manualPaymentMinDeposit: number;
+      manualPaymentEnabled: boolean;
+    }>,
+    actor: string
+  ): WebsiteMasterSettings {
+    const s = this.state.settings;
+    if (updates.bankName !== undefined) s.bankName = updates.bankName.trim();
+    if (updates.accountNumber !== undefined) s.accountNumber = updates.accountNumber.trim();
+    if (updates.accountName !== undefined) s.accountName = updates.accountName.trim();
+    if (updates.manualPaymentInstructions !== undefined) s.manualPaymentInstructions = updates.manualPaymentInstructions.trim();
+    if (updates.manualPaymentMinDeposit !== undefined) s.manualPaymentMinDeposit = Math.max(100, Number(updates.manualPaymentMinDeposit) || 500);
+    if (updates.manualPaymentEnabled !== undefined) s.manualPaymentEnabled = Boolean(updates.manualPaymentEnabled);
+
+    // Also sync wallet's bank details for consistency
+    if (s.bankName) this.state.wallet.bankName = s.bankName;
+    if (s.accountNumber) this.state.wallet.accountNumber = s.accountNumber;
+    if (s.accountName) this.state.wallet.accountName = s.accountName;
+
+    this.addAuditLog({
+      actor: actor || 'Admin',
+      action: 'Manual Payment Settings Updated',
+      category: 'SETTINGS',
+      details: `Bank: ${s.bankName}, Acc: ${s.accountNumber}, Active: ${s.manualPaymentEnabled ? 'Yes' : 'No'}`,
+      status: 'Success',
+    });
+
+    this.scheduleSave();
+    return s;
+  }
+
+  getManualPaymentRequests(customerId?: string, status?: string): ManualPaymentRequest[] {
+    if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
+    let list = [...this.state.manualPaymentRequests];
+    if (customerId) {
+      list = list.filter((r) => r.customerId === customerId);
+    }
+    if (status && status !== 'all') {
+      const normStatus = status.toLowerCase();
+      list = list.filter((r) => r.status.toLowerCase().includes(normStatus));
+    }
+    return list;
+  }
+
+  getManualPaymentRequestById(id: string): ManualPaymentRequest | undefined {
+    if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
+    return this.state.manualPaymentRequests.find((r) => r.id === id || r.reference === id);
+  }
+
+  createManualPaymentRequest(data: {
+    customerId: string;
+    amount: number;
+    transferReference?: string;
+    receiptUrl?: string;
+    receiptFileName?: string;
+  }): { success: boolean; request?: ManualPaymentRequest; error?: string } {
+    if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
+    const cust = this.getCustomer(data.customerId) || this.state.customers[0];
+    if (!cust) {
+      return { success: false, error: 'Customer account not found.' };
+    }
+
+    const s = this.state.settings;
+    if (s.manualPaymentEnabled === false) {
+      return { success: false, error: 'Manual bank transfer deposits are temporarily disabled by administrator.' };
+    }
+
+    const minDep = s.manualPaymentMinDeposit || s.minDeposit || 500;
+    const amount = Number(data.amount);
+    if (isNaN(amount) || amount < minDep) {
+      return { success: false, error: `Minimum deposit amount is ₦${minDep.toLocaleString()}.` };
+    }
+
+    const now = new Date().toISOString();
+    const reqId = `man-req-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const ref = `MAN-DEP-${Date.now().toString().slice(-6)}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const newReq: ManualPaymentRequest = {
+      id: reqId,
+      reference: ref,
+      customerId: cust.id,
+      customerName: cust.name,
+      customerUsername: cust.username || cust.email.split('@')[0],
+      customerEmail: cust.email,
+      customerPhone: cust.phone,
+      amount,
+      currency: s.currency || 'NGN',
+      bankName: s.bankName || 'Moniepoint MFB / Wema Bank',
+      accountNumber: s.accountNumber || '8149021844',
+      accountName: s.accountName || 'STEVELOGS MARKETPLACE SERVICES',
+      transferReference: (data.transferReference || '').trim(),
+      receiptUrl: data.receiptUrl || '',
+      receiptFileName: data.receiptFileName || 'receipt_screenshot.png',
+      status: 'Pending Approval',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.state.manualPaymentRequests.unshift(newReq);
+
+    // Record pending transaction in general transactions ledger so it is visible to customer
+    const tx: Transaction = {
+      id: `tx-man-${Date.now()}`,
+      reference: ref,
+      service: 'Manual Bank Transfer Deposit',
+      description: `Pending Approval: ₦${amount.toLocaleString()} transfer to ${newReq.bankName} (${newReq.accountNumber})`,
+      amount,
+      type: 'credit',
+      status: 'Pending',
+      date: 'Just now',
+      customerId: cust.id,
+      details: {
+        method: 'Manual Bank Transfer',
+        reference: ref,
+        bankName: newReq.bankName,
+        accountNumber: newReq.accountNumber,
+        transferReference: newReq.transferReference || '',
+      },
+    };
+    this.state.transactions.unshift(tx);
+
+    this.addAuditLog({
+      actor: cust.name,
+      action: 'Manual Payment Request Submitted',
+      category: 'WALLET',
+      details: `${cust.name} (${cust.id}) submitted manual transfer of ₦${amount.toLocaleString()} [Ref: ${ref}]`,
+      status: 'Success',
+    });
+
+    this.scheduleSave();
+    return { success: true, request: newReq };
+  }
+
+  approveManualPaymentRequest(
+    id: string,
+    approvedAmount?: number,
+    actor: string = 'Super Admin',
+    adminNotes?: string
+  ): {
+    success: boolean;
+    request?: ManualPaymentRequest;
+    customer?: CustomerRecord;
+    error?: string;
+  } {
+    if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
+    const req = this.state.manualPaymentRequests.find((r) => r.id === id || r.reference === id);
+    if (!req) {
+      return { success: false, error: 'Payment request not found.' };
+    }
+
+    // STRICT IDEMPOTENCY: Each payment request processed only once
+    if (req.status !== 'Pending Approval') {
+      return {
+        success: false,
+        error: `This request has already been ${req.status.toLowerCase()} and cannot be processed again.`,
+      };
+    }
+
+    const cust = this.getCustomer(req.customerId);
+    if (!cust) {
+      return { success: false, error: 'Associated customer account not found.' };
+    }
+
+    const finalAmount = approvedAmount !== undefined && !isNaN(approvedAmount) && approvedAmount > 0
+      ? Number(approvedAmount)
+      : req.amount;
+
+    const now = new Date().toISOString();
+    req.status = 'Approved';
+    req.approvedAmount = finalAmount;
+    req.approvedBy = actor;
+    req.approvedAt = now;
+    req.updatedAt = now;
+    if (adminNotes) req.adminNotes = adminNotes.trim();
+
+    // Atomic Wallet Crediting
+    const prevBalance = cust.walletBalance;
+    cust.walletBalance += finalAmount;
+    cust.totalDeposited += finalAmount;
+    cust.lastActive = now;
+    this.state.wallet.balance = cust.walletBalance;
+
+    // Update existing transaction in transaction history
+    const existingTx = this.state.transactions.find((t) => t.reference === req.reference);
+    if (existingTx) {
+      existingTx.status = 'Successful';
+      existingTx.amount = finalAmount;
+      existingTx.description = `Approved Bank Deposit (₦${finalAmount.toLocaleString()}) - ${req.bankName}`;
+      existingTx.details = {
+        ...(existingTx.details || {}),
+        approvedBy: actor,
+        approvedAt: now,
+      };
+    } else {
+      const tx: Transaction = {
+        id: `tx-man-app-${Date.now()}`,
+        reference: req.reference,
+        service: 'Manual Bank Transfer Deposit',
+        description: `Approved Bank Deposit (₦${finalAmount.toLocaleString()}) - ${req.bankName}`,
+        amount: finalAmount,
+        type: 'credit',
+        status: 'Successful',
+        date: 'Just now',
+        customerId: cust.id,
+        details: {
+          approvedBy: actor,
+          approvedAt: now,
+        },
+      };
+      this.state.transactions.unshift(tx);
+    }
+
+    this.addAuditLog({
+      actor,
+      action: 'Manual Payment Approved & Credited',
+      category: 'WALLET',
+      details: `Approved manual deposit [Ref: ${req.reference}] for ${cust.name}. Credited ₦${finalAmount.toLocaleString()} (Prev: ₦${prevBalance.toLocaleString()} -> New: ₦${cust.walletBalance.toLocaleString()})`,
+      status: 'Success',
+    });
+
+    this.scheduleSave();
+    return { success: true, request: req, customer: cust };
+  }
+
+  rejectManualPaymentRequest(
+    id: string,
+    reason?: string,
+    actor: string = 'Super Admin'
+  ): {
+    success: boolean;
+    request?: ManualPaymentRequest;
+    error?: string;
+  } {
+    if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
+    const req = this.state.manualPaymentRequests.find((r) => r.id === id || r.reference === id);
+    if (!req) {
+      return { success: false, error: 'Payment request not found.' };
+    }
+
+    if (req.status !== 'Pending Approval') {
+      return {
+        success: false,
+        error: `This request has already been ${req.status.toLowerCase()} and cannot be processed again.`,
+      };
+    }
+
+    const now = new Date().toISOString();
+    req.status = 'Rejected';
+    req.rejectionReason = reason ? reason.trim() : 'Payment could not be verified by administration.';
+    req.rejectedAt = now;
+    req.updatedAt = now;
+
+    // Update transaction to Failed
+    const existingTx = this.state.transactions.find((t) => t.reference === req.reference);
+    if (existingTx) {
+      existingTx.status = 'Failed';
+      existingTx.description = `Deposit Rejected: ${req.rejectionReason}`;
+    }
+
+    this.addAuditLog({
+      actor,
+      action: 'Manual Payment Rejected',
+      category: 'WALLET',
+      details: `Rejected manual deposit [Ref: ${req.reference}] for ${req.customerName}. Reason: ${req.rejectionReason}`,
+      status: 'Warning',
+    });
+
+    this.scheduleSave();
+    return { success: true, request: req };
   }
 }
 

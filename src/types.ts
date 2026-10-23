@@ -309,6 +309,9 @@ export interface WebsiteMasterSettings {
   bankName: string;
   accountNumber: string;
   accountName: string;
+  manualPaymentEnabled?: boolean;
+  manualPaymentInstructions?: string;
+  manualPaymentMinDeposit?: number;
   termsOfService: string;
   privacyPolicy: string;
   adminPasscodeHash?: string;
@@ -321,6 +324,33 @@ export interface WebsiteMasterSettings {
   flutterwavePublicKey?: string;
   flutterwaveSecretKey?: string;
   flutterwaveSecretHash?: string;
+}
+
+export interface ManualPaymentRequest {
+  id: string;
+  reference: string;
+  customerId: string;
+  customerName: string;
+  customerUsername?: string;
+  customerEmail: string;
+  customerPhone?: string;
+  amount: number;
+  approvedAmount?: number;
+  currency: string;
+  bankName: string;
+  accountNumber: string;
+  accountName: string;
+  transferReference?: string;
+  receiptUrl?: string; // image URL or base64 data URI
+  receiptFileName?: string;
+  status: 'Pending Approval' | 'Approved' | 'Rejected';
+  rejectionReason?: string;
+  adminNotes?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PaymentRecord {

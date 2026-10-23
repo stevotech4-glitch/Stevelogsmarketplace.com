@@ -22,8 +22,10 @@ app.use(express.urlencoded({ extended: true, limit: '60mb' }));
 const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 const VIDEOS_DIR = path.resolve(UPLOADS_DIR, 'videos');
 const THUMBNAILS_DIR = path.resolve(UPLOADS_DIR, 'thumbnails');
+const RECEIPTS_DIR = path.resolve(UPLOADS_DIR, 'receipts');
 if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 if (!fs.existsSync(THUMBNAILS_DIR)) fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
+if (!fs.existsSync(RECEIPTS_DIR)) fs.mkdirSync(RECEIPTS_DIR, { recursive: true });
 
 // Static serving for uploaded video and thumbnail assets
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -594,6 +596,36 @@ app.post('/api/auth/google', (req: Request, res: Response) => {
   });
 
   res.json(result);
+});
+
+app.post('/api/auth/reset-password', (req: Request, res: Response) => {
+  const { identifier, newPassword } = req.body;
+  if (!identifier || !newPassword) {
+    res.status(400).json({ success: false, error: 'Email, phone number, or username and new password are required.' });
+    return;
+  }
+  const idNorm = identifier.trim().toLowerCase();
+  const cust = db.getCustomers().find(
+    (c) =>
+      c.email.toLowerCase() === idNorm ||
+      (c.username && c.username.toLowerCase() === idNorm) ||
+      (c.phone && c.phone.replace(/\D/g, '').endsWith(idNorm.replace(/\D/g, '')))
+  );
+  if (!cust) {
+    res.status(404).json({ success: false, error: 'No customer account found matching the provided details.' });
+    return;
+  }
+  const { hash, salt } = hashPasscode(newPassword);
+  cust.passwordHash = hash;
+  cust.salt = salt;
+  db.addAuditLog({
+    actor: cust.name,
+    action: 'Customer Password Reset',
+    category: 'AUTH',
+    details: `Password reset successfully for ${cust.name} (${cust.email})`,
+    status: 'Success',
+  });
+  res.json({ success: true, message: 'Password has been reset successfully. You can now log in.' });
 });
 
 app.get('/api/auth/me', (req: Request, res: Response) => {
@@ -2556,6 +2588,149 @@ app.get('/api/admin/payments', requireAdminAuth, (_req: Request, res: Response) 
     totalDepositedNgn: successful.reduce((acc, p) => acc + p.amount, 0),
     payments,
   });
+});
+
+// ==========================================
+// MANUAL BANK TRANSFER PAYMENT SYSTEM
+// ==========================================
+
+// 1. Customer endpoint: Get active manual payment bank details and settings
+app.get('/api/payments/manual-settings', (_req: Request, res: Response) => {
+  res.json(db.getManualPaymentSettings());
+});
+
+// 2. Admin endpoint: Update manual payment bank details and settings
+app.post('/api/payments/manual-settings', requireAdminAuth, (req: Request, res: Response) => {
+  const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
+  const updated = db.updateManualPaymentSettings(req.body, actor);
+  res.json({
+    success: true,
+    settings: db.getManualPaymentSettings(),
+  });
+});
+
+// 3. Customer endpoint: Submit manual bank transfer payment request with receipt
+app.post('/api/payments/manual-request', (req: Request, res: Response) => {
+  try {
+    const { customerId, amount, transferReference, receiptUrl, receiptFileName } = req.body;
+    const callerCustomerId = (req.headers['x-customer-id'] as string) || customerId;
+
+    if (!callerCustomerId) {
+      res.status(400).json({ success: false, error: 'Customer account ID is required.' });
+      return;
+    }
+
+    const numAmount = Number(amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      res.status(400).json({ success: false, error: 'Please enter a valid deposit amount.' });
+      return;
+    }
+
+    let savedReceiptUrl = receiptUrl || '';
+
+    // If receipt is provided as base64 data URL, securely save to /uploads/receipts
+    if (receiptUrl && typeof receiptUrl === 'string' && receiptUrl.startsWith('data:')) {
+      try {
+        const matches = receiptUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        if (matches && matches.length === 3) {
+          const mimeType = matches[1];
+          const base64Data = matches[2];
+          const buffer = Buffer.from(base64Data, 'base64');
+
+          // Validate file size (max 15MB)
+          if (buffer.length > 15 * 1024 * 1024) {
+            res.status(400).json({ success: false, error: 'Receipt image size must not exceed 15MB.' });
+            return;
+          }
+
+          let ext = 'png';
+          if (mimeType.includes('jpeg') || mimeType.includes('jpg')) ext = 'jpg';
+          else if (mimeType.includes('webp')) ext = 'webp';
+          else if (mimeType.includes('pdf')) ext = 'pdf';
+
+          const filename = `receipt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+          const filePath = path.resolve(RECEIPTS_DIR, filename);
+          fs.writeFileSync(filePath, buffer);
+          savedReceiptUrl = `/uploads/receipts/${filename}`;
+        }
+      } catch (err) {
+        console.warn('[ManualPayment] Failed to save receipt to disk, using data URI:', err);
+      }
+    }
+
+    const result = db.createManualPaymentRequest({
+      customerId: callerCustomerId,
+      amount: numAmount,
+      transferReference,
+      receiptUrl: savedReceiptUrl,
+      receiptFileName: receiptFileName || 'receipt_screenshot.png',
+    });
+
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Failed to submit payment request.' });
+  }
+});
+
+// 4. Customer endpoint: View customer's own manual deposit requests
+app.get('/api/customer/manual-requests', (req: Request, res: Response) => {
+  const customerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string);
+  if (!customerId) {
+    res.status(400).json({ error: 'Customer ID is required.' });
+    return;
+  }
+  const status = req.query.status as string;
+  const requests = db.getManualPaymentRequests(customerId, status);
+  res.json(requests);
+});
+
+// 5. Admin endpoint: View all manual deposit requests with status filter
+app.get('/api/admin/payments/manual-requests', requireAdminAuth, (req: Request, res: Response) => {
+  const status = req.query.status as string;
+  const customerId = req.query.customerId as string;
+  const requests = db.getManualPaymentRequests(customerId, status);
+  res.json({
+    totalCount: requests.length,
+    pendingCount: requests.filter((r) => r.status === 'Pending Approval').length,
+    approvedCount: requests.filter((r) => r.status === 'Approved').length,
+    rejectedCount: requests.filter((r) => r.status === 'Rejected').length,
+    requests,
+  });
+});
+
+// 6. Admin endpoint: Approve manual payment request and credit customer wallet atomically
+app.post('/api/admin/payments/manual-requests/:id/approve', requireAdminAuth, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { approvedAmount, adminNotes } = req.body;
+  const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
+
+  const result = db.approveManualPaymentRequest(id, approvedAmount, actor, adminNotes);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+
+  res.json(result);
+});
+
+// 7. Admin endpoint: Reject manual payment request with optional reason
+app.post('/api/admin/payments/manual-requests/:id/reject', requireAdminAuth, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
+
+  const result = db.rejectManualPaymentRequest(id, reason, actor);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+
+  res.json(result);
 });
 
 // 9. Automated Requirement 14 Verification Test Suite

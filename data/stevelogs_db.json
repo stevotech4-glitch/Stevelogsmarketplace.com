@@ -43,7 +43,13 @@
     "flutterwaveMode": "test",
     "flutterwavePublicKey": "",
     "flutterwaveSecretKey": "",
-    "flutterwaveSecretHash": ""
+    "flutterwaveSecretHash": "",
+    "googleClientId": "",
+    "googleClientSecret": "",
+    "emailServiceEnabled": false,
+    "emailProvider": "none",
+    "emailApiKey": "",
+    "emailFromAddress": "support@stevelogs.com"
   },
   "providers": [
     {

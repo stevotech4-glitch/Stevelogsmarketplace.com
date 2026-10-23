@@ -162,24 +162,32 @@ export const AdminSpecialMarketplaceTab: React.FC<AdminSpecialMarketplaceTabProp
         setTimeout(() => setNotice(null), 4000);
         fetchListings();
       } else {
-        alert('Failed to save listing.');
+        const errData = await res.json().catch(() => ({}));
+        setNotice(errData.error || 'Failed to save listing.');
+        setTimeout(() => setNotice(null), 4000);
       }
-    } catch (e) {
-      alert('Network error while saving listing.');
+    } catch (e: any) {
+      setNotice(`Network error: ${e.message || 'Could not save listing'}`);
+      setTimeout(() => setNotice(null), 4000);
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to remove this listing?')) return;
     try {
       const res = await adminFetch(`/api/admin/marketplace/special/${id}`, { method: 'DELETE' });
       if (res.ok) {
+        setNotice('Listing removed successfully.');
+        setTimeout(() => setNotice(null), 3000);
         fetchListings();
+      } else {
+        setNotice('Failed to remove listing.');
+        setTimeout(() => setNotice(null), 3000);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setNotice(`Delete error: ${e.message}`);
+      setTimeout(() => setNotice(null), 3000);
     }
   };
 

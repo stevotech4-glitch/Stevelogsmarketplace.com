@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Lock, 
   Mail, 
@@ -15,7 +15,10 @@ import {
   Headphones, 
   Globe, 
   Sparkles,
-  Zap
+  Zap,
+  KeyRound,
+  X,
+  ExternalLink
 } from 'lucide-react';
 import { CustomerRecord, WebsiteMasterSettings } from '../types';
 
@@ -51,8 +54,8 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
     }
   });
 
-  const supportPhone = settings?.whatsappSupportNumber || '+2348152784536';
-  const callPhone = '09032912046';
+  const supportPhone = settings?.whatsappSupportNumber || '+2348149021844';
+  const callPhone = settings?.callPhoneNumber || '08149021844';
 
   // Handle Standard Login (Email or Phone + Password, No OTP)
   const handleLogin = async (e: React.FormEvent) => {
@@ -158,25 +161,145 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
     }
   };
 
+  // Password Reset 3-Step Flow State
+  const [resetStep, setResetStep] = useState<1 | 2 | 3>(1);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
+  const [devResetCode, setDevResetCode] = useState<string | null>(null);
+
+  // Google OAuth Flow State
+  const [googleModalOpen, setGoogleModalOpen] = useState(false);
+  const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
+  const [googleManualEmail, setGoogleManualEmail] = useState('');
+
+  // Auto-initialize Google Identity Services if client ID is configured
+  useEffect(() => {
+    fetch('/api/auth/google/config')
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg && cfg.configured && cfg.clientId) {
+          setGoogleConfigured(true);
+          const w = window as any;
+          if (w.google?.accounts?.id) {
+            try {
+              w.google.accounts.id.initialize({
+                client_id: cfg.clientId,
+                callback: (resp: any) => {
+                  if (resp.credential) {
+                    handleGoogleJwtCredential(resp.credential);
+                  }
+                },
+              });
+            } catch (e) {
+              console.warn('GIS init notice:', e);
+            }
+          }
+        } else {
+          setGoogleConfigured(false);
+        }
+      })
+      .catch(() => setGoogleConfigured(false));
+  }, []);
+
+  const handleGoogleJwtCredential = async (credential: string) => {
+    setGoogleLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.customer) {
+        throw new Error(data.error || 'Google authentication failed.');
+      }
+      if (data.token) {
+        localStorage.setItem('stevelogs_customer_token', data.token);
+      }
+      localStorage.setItem('stevelogs_customer_id', data.customer.id);
+      localStorage.setItem('stevelogs_customer_data', JSON.stringify(data.customer));
+
+      setSuccessMessage('Signed in with Google! Entering marketplace...');
+      setTimeout(() => {
+        onAuthSuccess(data.customer, data.token);
+      }, 500);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Google authentication error.');
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
   // Handle Real Google OAuth Login / Signup
   const handleGoogleAuth = async () => {
     setGoogleLoading(true);
     setErrorMessage(null);
 
     try {
-      // Use existing Google client if configured or prompt via Google One-Tap / OAuth prompt
-      // For immediate user entry without blocking, collect or prompt Google Account email
-      const promptEmail = window.prompt('Enter your Google / Gmail address to continue with Google:', '');
-      if (!promptEmail || !promptEmail.trim()) {
-        setGoogleLoading(false);
+      const configRes = await fetch('/api/auth/google/config').then((r) => r.json()).catch(() => null);
+      if (configRes && configRes.configured && configRes.clientId) {
+        const w = window as any;
+        if (w.google?.accounts?.id) {
+          try {
+            w.google.accounts.id.initialize({
+              client_id: configRes.clientId,
+              callback: (resp: any) => {
+                if (resp.credential) {
+                  handleGoogleJwtCredential(resp.credential);
+                }
+              },
+            });
+            w.google.accounts.id.prompt((notification: any) => {
+              if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+                const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
+                  configRes.clientId
+                )}&redirect_uri=${encodeURIComponent(
+                  configRes.redirectUri
+                )}&response_type=code&scope=openid%20profile%20email&access_type=offline&prompt=select_account`;
+                window.location.href = googleAuthUrl;
+              }
+            });
+            return;
+          } catch (gisErr) {
+            console.warn('GIS prompt error:', gisErr);
+          }
+        }
+
+        // Genuine Google OAuth 2.0 flow
+        const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(
+          configRes.clientId
+        )}&redirect_uri=${encodeURIComponent(
+          configRes.redirectUri
+        )}&response_type=code&scope=openid%20profile%20email&access_type=offline&prompt=select_account`;
+        window.location.href = googleAuthUrl;
         return;
       }
 
-      const cleanEmail = promptEmail.trim().toLowerCase();
-      if (!cleanEmail.includes('@')) {
-        throw new Error('Please enter a valid Gmail / Google email address.');
-      }
+      // If Google Client ID is not configured in backend settings, show transparent modal
+      setGoogleConfigured(false);
+      setGoogleModalOpen(true);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Google sign-in check failed.');
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
 
+  const handleManualGoogleAuth = async (emailToAuth: string) => {
+    const cleanEmail = emailToAuth.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setErrorMessage('Please enter a valid Google email address.');
+      return;
+    }
+
+    setGoogleLoading(true);
+    try {
       const res = await fetch('/api/auth/google', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -198,14 +321,138 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
       localStorage.setItem('stevelogs_customer_id', data.customer.id);
       localStorage.setItem('stevelogs_customer_data', JSON.stringify(data.customer));
 
+      setGoogleModalOpen(false);
       setSuccessMessage('Signed in with Google! Entering marketplace...');
       setTimeout(() => {
         onAuthSuccess(data.customer, data.token);
       }, 500);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Google sign-in error.');
+      setErrorMessage(err.message || 'Google authentication error.');
     } finally {
       setGoogleLoading(false);
+    }
+  };
+
+  // Step 1: Request Password Reset Code
+  const handleRequestResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError(null);
+    setResetNotice(null);
+
+    const emailToReset = (resetEmail || identifier).trim().toLowerCase();
+    if (!emailToReset || !emailToReset.includes('@')) {
+      setResetError('Please enter a valid registered email address.');
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailToReset }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'No customer account found with this email.');
+      }
+
+      setResetEmail(emailToReset);
+      if (data.code) {
+        setDevResetCode(data.code);
+        setResetNotice(data.message || `Verification code: ${data.code}`);
+      } else {
+        setResetNotice(data.message || 'Verification code sent to your email.');
+      }
+      setResetStep(2);
+    } catch (err: any) {
+      setResetError(err.message || 'Failed to request reset code.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  // Step 2: Verify 6-digit Code
+  const handleVerifyResetCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError(null);
+    setResetNotice(null);
+
+    if (!resetCode.trim() || resetCode.trim().length !== 6) {
+      setResetError('Please enter the 6-digit verification code sent to your email.');
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const res = await fetch('/api/auth/verify-reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: resetEmail, code: resetCode.trim() }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Invalid or expired verification code.');
+      }
+
+      setResetStep(3);
+      setResetNotice('Code verified! Enter your new password below.');
+    } catch (err: any) {
+      setResetError(err.message || 'Verification failed.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  // Step 3: Complete Password Reset
+  const handleCompleteReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError(null);
+    setResetNotice(null);
+
+    if (!newPassword || newPassword.length < 6) {
+      setResetError('Password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setResetError('Passwords do not match. Please re-enter.');
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: resetEmail,
+          code: resetCode.trim(),
+          newPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update password.');
+      }
+
+      setForgotPasswordOpen(false);
+      setSuccessMessage('Password reset successfully! All balances and records preserved. Please sign in.');
+      setAuthMode('login');
+      setIdentifier(resetEmail);
+      setPassword('');
+      // Reset flow state
+      setResetStep(1);
+      setResetCode('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setDevResetCode(null);
+    } catch (err: any) {
+      setResetError(err.message || 'Password reset error.');
+    } finally {
+      setResetLoading(false);
     }
   };
 
@@ -572,55 +819,279 @@ export const CustomerWelcomeAuthGate: React.FC<CustomerWelcomeAuthGateProps> = (
         </div>
       </main>
 
-      {/* Forgot Password Modal */}
+      {/* 3-Step Password Reset Modal */}
       {forgotPasswordOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-[#0f1d3d] border border-blue-500/30 rounded-3xl p-6 max-w-sm w-full space-y-4 text-white">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in">
+          <div className="bg-[#0f1d3d] border border-blue-500/40 rounded-3xl p-6 max-w-md w-full space-y-4 text-white shadow-2xl relative">
+            <button
+              type="button"
+              onClick={() => {
+                setForgotPasswordOpen(false);
+                setResetStep(1);
+                setResetError(null);
+                setResetNotice(null);
+              }}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-white/10 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            {/* Modal Header */}
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-2xl bg-amber-400/20 text-amber-400 flex items-center justify-center">
-                <Headphones className="w-5 h-5" />
+                <KeyRound className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-sm font-bold">Password Reset Assistance</h3>
-                <p className="text-[11px] text-blue-200/70">Instant Account Recovery</p>
+                <h3 className="text-base font-bold">Customer Password Reset</h3>
+                <p className="text-[11px] text-blue-200/70">
+                  Step {resetStep} of 3 • {resetStep === 1 ? 'Verify Email' : resetStep === 2 ? 'Enter Code' : 'New Password'}
+                </p>
               </div>
             </div>
 
-            <p className="text-xs text-blue-100/90 leading-relaxed">
-              To securely recover or reset your account password, please contact the Stevelogs official support desk on WhatsApp with your registered email or phone number.
-            </p>
-
-            <div className="bg-black/30 p-3 rounded-2xl border border-white/10 space-y-1.5 text-xs">
-              <div className="flex justify-between text-[11px]">
-                <span className="text-slate-400">WhatsApp Desk:</span>
-                <span className="font-mono font-bold text-emerald-400">{supportPhone}</span>
-              </div>
-              <div className="flex justify-between text-[11px]">
-                <span className="text-slate-400">Direct Call:</span>
-                <span className="font-mono font-bold text-amber-400">{callPhone}</span>
-              </div>
+            {/* Progress Bar */}
+            <div className="grid grid-cols-3 gap-1.5 py-1">
+              <div className={`h-1.5 rounded-full ${resetStep >= 1 ? 'bg-amber-400' : 'bg-white/10'}`} />
+              <div className={`h-1.5 rounded-full ${resetStep >= 2 ? 'bg-amber-400' : 'bg-white/10'}`} />
+              <div className={`h-1.5 rounded-full ${resetStep >= 3 ? 'bg-amber-400' : 'bg-white/10'}`} />
             </div>
 
-            <div className="flex gap-2 pt-2">
+            {resetNotice && (
+              <div className="p-3 rounded-xl bg-blue-500/20 border border-blue-400/40 text-blue-200 text-xs flex items-start gap-2">
+                <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <span>{resetNotice}</span>
+                  {devResetCode && resetStep === 2 && (
+                    <button
+                      type="button"
+                      onClick={() => setResetCode(devResetCode)}
+                      className="block mt-1 font-mono font-bold text-amber-300 underline text-[11px] cursor-pointer"
+                    >
+                      Click here to auto-fill test code: {devResetCode}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {resetError && (
+              <div className="p-3 rounded-xl bg-red-500/20 border border-red-500/40 text-red-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{resetError}</span>
+              </div>
+            )}
+
+            {/* Step 1: Request Code by Email */}
+            {resetStep === 1 && (
+              <form onSubmit={handleRequestResetCode} className="space-y-3.5">
+                <p className="text-xs text-blue-100/90 leading-relaxed">
+                  Enter your registered account email. A 6-digit verification code will be generated to securely reset your password.
+                </p>
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-bold text-slate-300">Registered Email Address</label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-blue-300/60 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="email"
+                      required
+                      placeholder="e.g. yourname@gmail.com"
+                      value={resetEmail || identifier}
+                      onChange={(e) => setResetEmail(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span>Wallet balance, order history & account data are 100% preserved.</span>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={resetLoading}
+                  className="w-full py-2.5 px-4 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                >
+                  {resetLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+                  <span>{resetLoading ? 'Generating Code...' : 'Send Verification Code'}</span>
+                </button>
+              </form>
+            )}
+
+            {/* Step 2: Enter Verification Code */}
+            {resetStep === 2 && (
+              <form onSubmit={handleVerifyResetCode} className="space-y-3.5">
+                <p className="text-xs text-blue-100/90 leading-relaxed">
+                  Enter the 6-digit verification code sent to <strong className="text-amber-300 font-mono">{resetEmail}</strong>.
+                </p>
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-bold text-slate-300">6-Digit Verification Code</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    placeholder="123456"
+                    value={resetCode}
+                    onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ''))}
+                    className="w-full text-center tracking-widest text-lg py-2.5 rounded-xl bg-black/40 border border-white/10 text-amber-300 font-mono font-bold focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setResetStep(1)}
+                    className="py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs cursor-pointer"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={resetLoading || resetCode.length !== 6}
+                    className="flex-1 py-2.5 px-4 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    {resetLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                    <span>{resetLoading ? 'Verifying...' : 'Verify Code'}</span>
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Step 3: Set New Password */}
+            {resetStep === 3 && (
+              <form onSubmit={handleCompleteReset} className="space-y-3.5">
+                <p className="text-xs text-blue-100/90 leading-relaxed">
+                  Enter your new password below. It must be at least 6 characters long.
+                </p>
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-bold text-slate-300">New Password</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    placeholder="Enter new password (min. 6 chars)"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-black/40 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-bold text-slate-300">Confirm New Password</label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    placeholder="Repeat new password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-black/40 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={resetLoading}
+                  className="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 shadow-lg"
+                >
+                  {resetLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  <span>{resetLoading ? 'Updating Password...' : 'Save Password & Sign In'}</span>
+                </button>
+              </form>
+            )}
+
+            {/* Support Desk Direct Contact */}
+            <div className="pt-3 border-t border-white/10 space-y-2">
+              <p className="text-[11px] text-blue-200/70">Need instant human help with your account?</p>
               <a
                 href={`https://wa.me/${supportPhone.replace(/\D/g, '')}?text=${encodeURIComponent(
                   'Hello Stevelogs Support, I need help recovering my account password.'
                 )}`}
                 target="_blank"
                 rel="noreferrer"
-                className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md"
+                className="w-full py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-center gap-1.5 font-bold"
               >
                 <MessageCircle className="w-3.5 h-3.5" />
-                <span>Chat on WhatsApp</span>
+                <span>Chat with Official WhatsApp Support ({supportPhone})</span>
               </a>
-              <button
-                type="button"
-                onClick={() => setForgotPasswordOpen(false)}
-                className="py-2.5 px-4 rounded-xl bg-white/10 hover:bg-white/20 text-white font-bold text-xs cursor-pointer"
-              >
-                Close
-              </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Google Sign-In Assistance / Direct Auth Modal */}
+      {googleModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in">
+          <div className="bg-[#0f1d3d] border border-blue-500/40 rounded-3xl p-6 max-w-md w-full space-y-4 text-white shadow-2xl relative">
+            <button
+              type="button"
+              onClick={() => setGoogleModalOpen(false)}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white rounded-full bg-white/5 hover:bg-white/10 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-white text-slate-900 flex items-center justify-center font-bold">
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                  />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-base font-bold">Google Authentication</h3>
+                <p className="text-[11px] text-blue-200/70">Fast Sign-In & Registration</p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs leading-relaxed">
+              Google OAuth client ID is not yet connected in the environment. You can enter your Google account email below to authenticate immediately, or the admin can add credentials in <strong className="text-white">Admin Settings &rarr; Google OAuth</strong>.
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleManualGoogleAuth(googleManualEmail);
+              }}
+              className="space-y-3"
+            >
+              <div className="space-y-1">
+                <label className="block text-[11px] font-bold text-slate-300">Your Google Email Address</label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-blue-300/60 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="email"
+                    required
+                    placeholder="e.g. yourname@gmail.com"
+                    value={googleManualEmail}
+                    onChange={(e) => setGoogleManualEmail(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400 font-mono"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={googleLoading || !googleManualEmail.trim()}
+                className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50"
+              >
+                {googleLoading ? <Loader2 className="w-4 h-4 animate-spin text-slate-700" /> : <CheckCircle2 className="w-4 h-4 text-blue-600" />}
+                <span>{googleLoading ? 'Connecting...' : 'Continue with this Google Email'}</span>
+              </button>
+            </form>
           </div>
         </div>
       )}

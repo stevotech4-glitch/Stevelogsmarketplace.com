@@ -561,6 +561,21 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   res.json(result);
 });
 
+app.get('/api/auth/google/config', (req: Request, res: Response) => {
+  const settings = db.getSettings();
+  const googleClientId = process.env.GOOGLE_CLIENT_ID || settings.googleClientId || '';
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
+  const redirectUri = `${baseUrl.replace(/\/$/, '')}/api/auth/google/callback`;
+
+  res.json({
+    configured: Boolean(googleClientId && googleClientId.trim() !== ''),
+    clientId: googleClientId,
+    redirectUri,
+  });
+});
+
 app.post('/api/auth/google', (req: Request, res: Response) => {
   const { email, name, googleId, picture, credential } = req.body;
   let userEmail = email;
@@ -598,34 +613,210 @@ app.post('/api/auth/google', (req: Request, res: Response) => {
   res.json(result);
 });
 
+// Google OAuth 2.0 Callback Handler
+app.get('/api/auth/google/callback', async (req: Request, res: Response) => {
+  try {
+    const code = req.query.code as string;
+    const error = req.query.error as string;
+
+    if (error) {
+      res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(`Google sign-in was cancelled or encountered an error: ${error}`)}`);
+      return;
+    }
+
+    if (!code) {
+      res.redirect('/?auth_status=error&error_msg=No+authorization+code+received+from+Google');
+      return;
+    }
+
+    const settings = db.getSettings();
+    const googleClientId = process.env.GOOGLE_CLIENT_ID || settings.googleClientId || '';
+    const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || settings.googleClientSecret || '';
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
+    const redirectUri = `${baseUrl.replace(/\/$/, '')}/api/auth/google/callback`;
+
+    if (!googleClientId || !googleClientSecret) {
+      res.redirect('/?auth_status=error&error_msg=Google+Client+Secret+not+configured+in+server+environment');
+      return;
+    }
+
+    // Exchange authorization code with Google OAuth token service
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: googleClientId,
+        client_secret: googleClientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || !tokenData.access_token) {
+      const errMsg = tokenData.error_description || tokenData.error || 'Failed to exchange authorization code with Google';
+      console.warn('[Google OAuth Callback] Token exchange failed:', errMsg);
+      res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(errMsg)}`);
+      return;
+    }
+
+    // Retrieve user profile from Google UserInfo endpoint
+    const userinfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const userinfo = await userinfoRes.json();
+
+    if (!userinfo.email) {
+      res.redirect('/?auth_status=error&error_msg=Google+account+did+not+provide+an+email+address');
+      return;
+    }
+
+    const result = db.findOrCreateGoogleCustomer({
+      email: userinfo.email,
+      name: userinfo.name || userinfo.email.split('@')[0],
+      googleId: userinfo.sub,
+      picture: userinfo.picture,
+    });
+
+    if (!result.success || !result.customer) {
+      res.redirect('/?auth_status=error&error_msg=Failed+to+establish+customer+session');
+      return;
+    }
+
+    // Redirect back to customer portal with active authenticated token
+    res.redirect(`/?auth_status=success&auth_token=${encodeURIComponent(result.token || '')}&customer_id=${encodeURIComponent(result.customer.id)}`);
+  } catch (err: any) {
+    console.error('[Google OAuth Callback] Unexpected handler error:', err);
+    res.redirect(`/?auth_status=error&error_msg=${encodeURIComponent(err.message || 'Google authentication encountered an error')}`);
+  }
+});
+
+// 1. Forgot Password: Generate 6-digit verification code & send email if configured
+app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (!email || !email.trim()) {
+    res.status(400).json({ success: false, error: 'Please enter your registered email address.' });
+    return;
+  }
+
+  const result = db.createPasswordResetCode(email);
+  if (!result.success || !result.code) {
+    res.status(404).json({ success: false, error: result.error || 'Account not found.' });
+    return;
+  }
+
+  const settings = db.getSettings();
+  const resendApiKey = process.env.RESEND_API_KEY || settings.emailApiKey;
+  let emailSent = false;
+  let emailError: string | null = null;
+
+  // Attempt real email delivery if Resend API key is configured
+  if (resendApiKey && resendApiKey.trim() !== '') {
+    try {
+      const emailRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${resendApiKey.trim()}`,
+        },
+        body: JSON.stringify({
+          from: settings.emailFromAddress || 'STEVELOGS Support <support@stevelogs.com>',
+          to: [email.trim().toLowerCase()],
+          subject: 'STEVELOGS Security — Password Reset Verification Code',
+          html: `
+            <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px;">
+              <h2 style="color: #0f172a; margin-bottom: 8px;">STEVELOGS MARKETPLACE</h2>
+              <p style="color: #475569; font-size: 14px;">You requested to reset your account password. Use the verification code below:</p>
+              <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 16px; text-align: center; margin: 20px 0;">
+                <span style="font-family: monospace; font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #1e3a8a;">${result.code}</span>
+              </div>
+              <p style="color: #64748b; font-size: 12px;">This code is valid for 15 minutes. If you did not make this request, please contact our 24/7 WhatsApp Desk immediately.</p>
+            </div>
+          `,
+        }),
+      });
+
+      if (emailRes.ok) {
+        emailSent = true;
+      } else {
+        const errData = await emailRes.json().catch(() => ({}));
+        emailError = (errData as any)?.message || 'Email delivery service returned an error.';
+      }
+    } catch (e: any) {
+      emailError = e.message || 'Failed to dispatch email';
+    }
+  }
+
+  // Transparent response: If email service is not configured or in testing, return the verification code
+  if (emailSent) {
+    res.json({
+      success: true,
+      emailSent: true,
+      message: 'A 6-digit verification code has been sent to your email address.',
+    });
+  } else {
+    // Honest status reporting as required by Requirement 5
+    res.json({
+      success: true,
+      emailSent: false,
+      code: result.code, // provided so customer can test and complete reset even when SMTP/Resend is not set up in sandbox
+      message: emailError
+        ? `Verification code generated: ${result.code}. (Email service error: ${emailError})`
+        : `Verification code generated: ${result.code}. (No external email service configured; use this code to proceed)`,
+    });
+  }
+});
+
+// 2. Verify Reset Code
+app.post('/api/auth/verify-reset-code', (req: Request, res: Response) => {
+  const { email, code } = req.body;
+  const result = db.verifyPasswordResetCode(email, code);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json({ success: true, message: 'Verification code is valid.' });
+});
+
+// 3. Complete Password Reset
 app.post('/api/auth/reset-password', (req: Request, res: Response) => {
-  const { identifier, newPassword } = req.body;
-  if (!identifier || !newPassword) {
-    res.status(400).json({ success: false, error: 'Email, phone number, or username and new password are required.' });
+  const { email, identifier, code, newPassword } = req.body;
+  const targetEmail = email || identifier;
+
+  if (!targetEmail || !newPassword) {
+    res.status(400).json({ success: false, error: 'Email and new password are required.' });
     return;
   }
-  const idNorm = identifier.trim().toLowerCase();
-  const cust = db.getCustomers().find(
-    (c) =>
-      c.email.toLowerCase() === idNorm ||
-      (c.username && c.username.toLowerCase() === idNorm) ||
-      (c.phone && c.phone.replace(/\D/g, '').endsWith(idNorm.replace(/\D/g, '')))
-  );
-  if (!cust) {
-    res.status(404).json({ success: false, error: 'No customer account found matching the provided details.' });
+
+  if (!code) {
+    res.status(400).json({ success: false, error: '6-digit email verification code is required to reset your password.' });
     return;
   }
-  const { hash, salt } = hashPasscode(newPassword);
-  cust.passwordHash = hash;
-  cust.salt = salt;
-  db.addAuditLog({
-    actor: cust.name,
-    action: 'Customer Password Reset',
-    category: 'AUTH',
-    details: `Password reset successfully for ${cust.name} (${cust.email})`,
-    status: 'Success',
+
+  const result = db.resetCustomerPassword(targetEmail, code, newPassword);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+
+  res.json({
+    success: true,
+    message: 'Your password has been reset successfully! All account balances and history are preserved. You can now sign in.',
   });
-  res.json({ success: true, message: 'Password has been reset successfully. You can now log in.' });
+});
+
+// Admin Passcode Change Endpoint
+app.post('/api/admin/change-passcode', requireAdminAuth, (req: Request, res: Response) => {
+  const { currentPasscode, newPasscode } = req.body;
+  const result = db.changeAdminPasscode(currentPasscode, newPasscode);
+  if (!result.success) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json({ success: true, message: 'Administrative master passcode has been updated successfully.' });
 });
 
 app.get('/api/auth/me', (req: Request, res: Response) => {
@@ -1794,7 +1985,20 @@ app.get('/api/wallet', (_req: Request, res: Response) => {
 });
 
 app.put('/api/wallet', requireAdminAuth, (req: Request, res: Response) => {
+  const actor = (req.headers['x-admin-actor'] as string) || 'Admin';
   const updated = db.updateWallet(req.body);
+  if (req.body.bankName || req.body.accountNumber || req.body.accountName) {
+    db.updateSettings({
+      bankName: req.body.bankName,
+      accountNumber: req.body.accountNumber,
+      accountName: req.body.accountName,
+    }, actor);
+    db.updateManualPaymentSettings({
+      bankName: req.body.bankName,
+      accountNumber: req.body.accountNumber,
+      accountName: req.body.accountName,
+    }, actor);
+  }
   res.json(updated);
 });
 

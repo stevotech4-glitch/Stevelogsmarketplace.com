@@ -285,6 +285,7 @@ export interface WebsiteMasterSettings {
   logoUrl: string;
   contactEmail: string;
   whatsappSupportNumber: string;
+  callPhoneNumber?: string;
   whatsappSupportLabel: string;
   whatsappWelcomeMessage: string;
   whatsappSupportPlacement: 'all' | 'header' | 'floating';
@@ -324,6 +325,16 @@ export interface WebsiteMasterSettings {
   flutterwavePublicKey?: string;
   flutterwaveSecretKey?: string;
   flutterwaveSecretHash?: string;
+  googleClientId?: string;
+  googleClientSecret?: string;
+  emailServiceEnabled?: boolean;
+  emailProvider?: 'resend' | 'smtp' | 'sendgrid' | 'none';
+  emailApiKey?: string;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpUser?: string;
+  smtpPass?: string;
+  emailFromAddress?: string;
 }
 
 export interface ManualPaymentRequest {

@@ -93,7 +93,8 @@ export const AdminAnnouncementsTab: React.FC<AdminAnnouncementsTabProps> = ({ ad
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formTitle.trim() || !formContent.trim()) {
-      alert('Please provide an announcement title and message content.');
+      setNotice('Please provide an announcement title and message content.');
+      setTimeout(() => setNotice(null), 3500);
       return;
     }
 
@@ -126,24 +127,32 @@ export const AdminAnnouncementsTab: React.FC<AdminAnnouncementsTabProps> = ({ ad
         setTimeout(() => setNotice(null), 4000);
         fetchAnnouncements();
       } else {
-        alert('Failed to save announcement.');
+        const errData = await res.json().catch(() => ({}));
+        setNotice(errData.error || 'Failed to save announcement.');
+        setTimeout(() => setNotice(null), 4000);
       }
-    } catch (e) {
-      alert('Network error while saving announcement.');
+    } catch (e: any) {
+      setNotice(`Network error: ${e.message || 'Could not save announcement'}`);
+      setTimeout(() => setNotice(null), 4000);
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this announcement?')) return;
     try {
       const res = await adminFetch(`/api/admin/announcements/${id}`, { method: 'DELETE' });
       if (res.ok) {
+        setNotice('Announcement deleted successfully.');
+        setTimeout(() => setNotice(null), 3000);
         fetchAnnouncements();
+      } else {
+        setNotice('Failed to delete announcement.');
+        setTimeout(() => setNotice(null), 3000);
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setNotice(`Delete error: ${e.message}`);
+      setTimeout(() => setNotice(null), 3000);
     }
   };
 

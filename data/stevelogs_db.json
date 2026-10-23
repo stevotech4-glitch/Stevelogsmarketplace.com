@@ -56615,8 +56615,8 @@
       "name": "Stevo Tech (Admin/Owner)",
       "email": "stevotech2@gmail.com",
       "phone": "+2348149021844",
-      "walletBalance": 5000,
-      "totalDeposited": 5000,
+      "walletBalance": 0,
+      "totalDeposited": 0,
       "totalSpent": 0,
       "ordersCount": 0,
       "successfulOrders": 0,
@@ -56624,7 +56624,7 @@
       "status": "Active",
       "tier": "VIP Reseller",
       "joinedAt": "2026-01-15T10:00:00Z",
-      "lastActive": "2026-10-23T12:12:57.392Z",
+      "lastActive": "2026-10-22T07:39:47.861Z",
       "referralCode": "SL-1001",
       "referralLink": "https://stevelogsmarketplace.com/?ref=SL-1001",
       "totalReferrals": 0,
@@ -56633,28 +56633,7 @@
       "referralBalance": 0
     }
   ],
-  "transactions": [
-    {
-      "id": "tx-man-1792757508066",
-      "reference": "MAN-DEP-508066-2567",
-      "service": "Manual Bank Transfer Deposit",
-      "description": "Approved Bank Deposit (₦5,000) - Moniepoint MFB / Wema Bank",
-      "amount": 5000,
-      "type": "credit",
-      "status": "Successful",
-      "date": "Just now",
-      "customerId": "CUST-1001",
-      "details": {
-        "method": "Manual Bank Transfer",
-        "reference": "MAN-DEP-508066-2567",
-        "bankName": "Moniepoint MFB / Wema Bank",
-        "accountNumber": "8149021844",
-        "transferReference": "TRF-TEST-8899",
-        "approvedBy": "Super Administrator",
-        "approvedAt": "2026-10-23T12:12:57.392Z"
-      }
-    }
-  ],
+  "transactions": [],
   "orders": [],
   "telegramPricing": {
     "providerId": "nova",
@@ -56731,46 +56710,6 @@
   "telegramOrders": [],
   "auditLogs": [
     {
-      "id": "aud-1792757577392-950",
-      "timestamp": "2026-10-23T12:12:57.392Z",
-      "actor": "Super Administrator",
-      "action": "Manual Payment Approved & Credited",
-      "category": "WALLET",
-      "details": "Approved manual deposit [Ref: MAN-DEP-508066-2567] for Stevo Tech (Admin/Owner). Credited ₦5,000 (Prev: ₦0 -> New: ₦5,000)",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792757557117-513",
-      "timestamp": "2026-10-23T12:12:37.117Z",
-      "actor": "Super Administrator",
-      "action": "Admin Panel Authenticated",
-      "category": "AUTH",
-      "details": "Successful administrator authentication session created from 127.0.0.1.",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792757518161-164",
-      "timestamp": "2026-10-23T12:11:58.161Z",
-      "actor": "Unknown",
-      "action": "Admin Login Failed",
-      "category": "AUTH",
-      "details": "Invalid credentials attempt (1/5) from 127.0.0.1.",
-      "ip": "127.0.0.1",
-      "status": "Failed"
-    },
-    {
-      "id": "aud-1792757508143-816",
-      "timestamp": "2026-10-23T12:11:48.143Z",
-      "actor": "Stevo Tech (Admin/Owner)",
-      "action": "Manual Payment Request Submitted",
-      "category": "WALLET",
-      "details": "Stevo Tech (Admin/Owner) (CUST-1001) submitted manual transfer of ₦5,000 [Ref: MAN-DEP-508066-2567]",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
       "id": "aud-1792654787861-561",
       "timestamp": "2026-10-22T07:39:47.861Z",
       "actor": "Stevo Tech (Admin/Owner)",
@@ -56826,7 +56765,7 @@
     "disclaimer": "This is a customer loyalty reward credit program. Yield rates may be adjusted or paused based on business liquidity policy."
   },
   "wallet": {
-    "balance": 5000,
+    "balance": 0,
     "currency": "₦",
     "bonus": 0,
     "accountNumber": "0067100155",
@@ -57093,30 +57032,5 @@
     }
   ],
   "specialOrders": [],
-  "manualPaymentRequests": [
-    {
-      "id": "man-req-1792757508066-954",
-      "reference": "MAN-DEP-508066-2567",
-      "customerId": "CUST-1001",
-      "customerName": "Stevo Tech (Admin/Owner)",
-      "customerUsername": "stevotech2",
-      "customerEmail": "stevotech2@gmail.com",
-      "customerPhone": "+2348149021844",
-      "amount": 5000,
-      "currency": "NGN",
-      "bankName": "Moniepoint MFB / Wema Bank",
-      "accountNumber": "8149021844",
-      "accountName": "STEVELOGS MARKETPLACE SERVICES",
-      "transferReference": "TRF-TEST-8899",
-      "receiptUrl": "",
-      "receiptFileName": "test_receipt.png",
-      "status": "Approved",
-      "createdAt": "2026-10-23T12:11:48.066Z",
-      "updatedAt": "2026-10-23T12:12:57.392Z",
-      "approvedAmount": 5000,
-      "approvedBy": "Super Administrator",
-      "approvedAt": "2026-10-23T12:12:57.392Z",
-      "adminNotes": "Verified bank alert received from customer"
-    }
-  ]
+  "manualPaymentRequests": []
 }

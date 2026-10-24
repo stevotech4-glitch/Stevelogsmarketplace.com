@@ -674,378 +674,244 @@ export class ProviderService {
   }
 
   /**
-   * Allocate a genuine virtual phone number for a customer's order.
-   * Guarantees:
-   * 1. Proper E.164 national telecommunications format by country
-   * 2. Zero re-used or duplicate numbers across orders
-   * 3. Upstream provider query when credentials are provided
+   * Request real virtual number purchase from configured upstream provider API.
+   * Never fabricates numbers. If credentials or upstream balance are missing, returns an explicit error.
    */
-  static async allocateVirtualNumber(params: {
-    provider: ProviderConfig;
-    countryCode: string;
-    dialCode?: string;
-    serviceId: string;
-    serviceName: string;
-    serverRoute?: string;
-    existingNumbers?: string[];
-  }): Promise<{
+  static async orderVirtualNumber(
+    provider: ProviderConfig,
+    params: {
+      serviceName: string;
+      serviceId?: string;
+      countryIso?: string;
+      countryName?: string;
+      serverName?: string;
+    }
+  ): Promise<{
     success: boolean;
     phoneNumber?: string;
-    providerRef?: string;
-    activationId?: string;
-    expiresAt?: string;
+    providerOrderId?: string;
     error?: string;
+    code?: 'CREDENTIALS_REQUIRED' | 'PROVIDER_ERROR' | 'OUT_OF_STOCK';
+    rawResponse?: any;
   }> {
-    const { provider, countryCode, dialCode, serviceId, serviceName, existingNumbers = [] } = params;
-    const existingSet = new Set(existingNumbers);
+    if (!provider.apiKey || provider.apiKey.trim() === '') {
+      return {
+        success: false,
+        error: `Provider credentials required: No API Key configured for ${provider.name}. Please enter your ${provider.name} API Key in Admin Dashboard -> Providers to enable live number provisioning.`,
+        code: 'CREDENTIALS_REQUIRED',
+      };
+    }
 
-    // 1. If provider has active API credentials, attempt upstream live allocation
-    if (provider.apiKey && provider.baseUrl && provider.apiKey.trim().length > 5) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 6000);
+    if (!provider.baseUrl || provider.baseUrl.trim() === '') {
+      return {
+        success: false,
+        error: `Provider Base URL is missing for ${provider.name}.`,
+        code: 'PROVIDER_ERROR',
+      };
+    }
 
-        if (provider.id === 'benotp') {
-          // BenOTP number allocation endpoint
-          const res = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/orders/buy`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${provider.apiKey}`,
-              'X-API-KEY': provider.apiKey,
-            },
-            body: JSON.stringify({
-              country: countryCode.toLowerCase(),
-              service: serviceId.toLowerCase(),
-            }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeout);
+    const cleanBaseUrl = provider.baseUrl.replace(/\/$/, '');
+    const cleanApiKey = provider.apiKey.trim();
 
-          if (res.ok) {
-            const data = await res.json();
-            if (data.phone_number || data.number) {
-              const num = String(data.phone_number || data.number).replace(/[^\d+]/g, '');
-              const formatted = num.startsWith('+') ? num : `+${num}`;
-              return {
-                success: true,
-                phoneNumber: formatted,
-                providerRef: data.order_id || data.id || `BEN-${countryCode.toUpperCase()}-${Date.now().toString().slice(-6)}`,
-                activationId: String(data.activation_id || data.id || `ACT-${Date.now()}`),
-                expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-              };
-            }
-          }
-        } else if (provider.id === 'nova') {
-          // Nova Solution number allocation endpoint
-          const res = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/numbers/purchase`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${provider.apiKey}`,
-            },
-            body: JSON.stringify({
-              country_code: countryCode.toUpperCase(),
-              service_id: serviceId,
-            }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeout);
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
-          if (res.ok) {
-            const data = await res.json();
-            if (data.phone_number || data.phone) {
-              const num = String(data.phone_number || data.phone).replace(/[^\d+]/g, '');
-              const formatted = num.startsWith('+') ? num : `+${num}`;
-              return {
-                success: true,
-                phoneNumber: formatted,
-                providerRef: data.reference || data.order_id || `NOVA-${countryCode.toUpperCase()}-${Date.now().toString().slice(-6)}`,
-                activationId: String(data.activation_id || data.id || `ACT-${Date.now()}`),
-                expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-              };
-            }
-          }
+      let targetUrl = `${cleanBaseUrl}/orders/create`;
+      const headers: Record<string, string> = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Stevelogs-Virtual-Numbers/2.0',
+      };
+
+      let bodyData: any = {
+        service: params.serviceId || params.serviceName,
+        country: params.countryIso || 'US',
+        server: params.serverName || 'Server 1',
+      };
+
+      if (provider.id === 'nova') {
+        targetUrl = `${cleanBaseUrl}/numbers/buy`;
+        headers['Authorization'] = `Bearer ${cleanApiKey}`;
+        bodyData = {
+          service: params.serviceId || params.serviceName,
+          country: params.countryIso || 'US',
+          scope: params.serverName?.toLowerCase().includes('usa') ? 'usa' : 'global',
+        };
+      } else if (provider.id === 'benotp') {
+        targetUrl = `${cleanBaseUrl}/orders/buy-number`;
+        headers['Authorization'] = `Bearer ${cleanApiKey}`;
+        headers['X-API-KEY'] = cleanApiKey;
+        bodyData = {
+          service: params.serviceId || params.serviceName,
+          country: params.countryIso || 'US',
+          server: params.serverName || 'Server 1',
+        };
+      }
+
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(bodyData),
+        signal: controller.signal,
+      }).catch((err) => {
+        if (err.name === 'AbortError') {
+          throw new Error(`Upstream request to ${provider.name} timed out after 12s.`);
         }
-      } catch (upstreamErr: any) {
-        console.warn(`Upstream allocation ping to ${provider.name} notice:`, upstreamErr.message);
+        throw err;
+      });
+
+      clearTimeout(timeoutId);
+
+      let data: any = {};
+      try {
+        data = await response.json();
+      } catch {
+        const text = await response.text().catch(() => '');
+        return {
+          success: false,
+          error: `Upstream ${provider.name} returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 120)}`,
+          code: 'PROVIDER_ERROR',
+        };
       }
+
+      if (!response.ok) {
+        const errMsg = data.message || data.error || data.detail || `HTTP ${response.status} from ${provider.name}`;
+        return {
+          success: false,
+          error: `${provider.name} rejected purchase: ${errMsg}`,
+          code: response.status === 401 || response.status === 403 ? 'CREDENTIALS_REQUIRED' : 'PROVIDER_ERROR',
+          rawResponse: data,
+        };
+      }
+
+      // Extract real phone number and order ID
+      const realPhone = data.phone || data.number || data.phoneNumber || data.data?.phone || data.data?.number;
+      const realOrderId = data.order_id || data.id || data.orderId || data.data?.order_id || data.data?.id;
+
+      if (!realPhone) {
+        return {
+          success: false,
+          error: data.message || data.error || `No number available from ${provider.name} for this service/country at the moment.`,
+          code: 'OUT_OF_STOCK',
+          rawResponse: data,
+        };
+      }
+
+      return {
+        success: true,
+        phoneNumber: String(realPhone).startsWith('+') ? String(realPhone) : `+${realPhone}`,
+        providerOrderId: realOrderId ? String(realOrderId) : undefined,
+        rawResponse: data,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: `Could not connect to ${provider.name}: ${err.message || 'Network unreachable'}`,
+        code: 'PROVIDER_ERROR',
+      };
     }
-
-    // 2. High-Reliability Telecommunications Virtual Number Engine
-    // Real, working telecom area codes and prefixes per international numbering plan
-    const upperCountry = (countryCode || 'US').toUpperCase();
-    let allocatedPhone = '';
-
-    for (let attempt = 0; attempt < 30; attempt++) {
-      if (upperCountry === 'US') {
-        // Genuine United States North American Numbering Plan (NANP) area codes
-        const US_AREA_CODES = [
-          '213', '310', '323', '415', '628', '650', '408', '510', '512', '737', 
-          '214', '469', '713', '832', '305', '786', '407', '312', '773', '206', 
-          '425', '404', '678', '702', '602', '303', '720', '212', '332', '646', 
-          '718', '917', '929', '617', '857', '215', '267', '480', '503', '971'
-        ];
-        const areaCode = US_AREA_CODES[Math.floor(Math.random() * US_AREA_CODES.length)];
-        const exchange = Math.floor(201 + Math.random() * 798); // 201-999 (excluding x11)
-        const station = Math.floor(1000 + Math.random() * 9000); // 1000-9999
-        allocatedPhone = `+1${areaCode}${exchange}${station}`;
-      } else if (upperCountry === 'GB') {
-        // Genuine UK Ofcom Mobile Numbering Range (074xx, 075xx, 077xx, 078xx, 079xx)
-        const UK_MOBILE_PREFIXES = ['7401', '7452', '7503', '7537', '7700', '7712', '7829', '7911', '7946', '7979'];
-        const prefix = UK_MOBILE_PREFIXES[Math.floor(Math.random() * UK_MOBILE_PREFIXES.length)];
-        const subscriber = Math.floor(100000 + Math.random() * 900000);
-        allocatedPhone = `+44${prefix}${subscriber}`;
-      } else if (upperCountry === 'NG') {
-        // Genuine Nigerian Mobile Prefixes (MTN, Airtel, Glo, 9mobile)
-        const NG_PREFIXES = ['803', '806', '814', '816', '703', '706', '802', '808', '812', '708', '805', '807', '815', '705', '809', '817', '818', '909'];
-        const prefix = NG_PREFIXES[Math.floor(Math.random() * NG_PREFIXES.length)];
-        const subscriber = Math.floor(1000000 + Math.random() * 9000000);
-        allocatedPhone = `+234${prefix}${subscriber}`;
-      } else if (upperCountry === 'CA') {
-        // Canada NANP
-        const CA_AREA_CODES = ['416', '647', '514', '604', '403', '780', '613', '905', '250', '902'];
-        const area = CA_AREA_CODES[Math.floor(Math.random() * CA_AREA_CODES.length)];
-        const ex = Math.floor(201 + Math.random() * 798);
-        const st = Math.floor(1000 + Math.random() * 9000);
-        allocatedPhone = `+1${area}${ex}${st}`;
-      } else if (upperCountry === 'FR') {
-        const prefix = Math.random() > 0.5 ? '6' : '7';
-        allocatedPhone = `+33${prefix}${Math.floor(10000000 + Math.random() * 90000000)}`;
-      } else if (upperCountry === 'DE') {
-        const DE_PREFIXES = ['151', '152', '160', '170', '171', '175'];
-        const p = DE_PREFIXES[Math.floor(Math.random() * DE_PREFIXES.length)];
-        allocatedPhone = `+49${p}${Math.floor(1000000 + Math.random() * 9000000)}`;
-      } else {
-        const cleanDial = (dialCode || '+1').replace(/[^\d]/g, '') || '1';
-        allocatedPhone = `+${cleanDial}${Math.floor(1000000000 + Math.random() * 8999999999)}`;
-      }
-
-      // Guarantee uniqueness — never re-use a number that has been allocated
-      if (!existingSet.has(allocatedPhone)) {
-        break;
-      }
-    }
-
-    const providerCode = provider.id.toUpperCase();
-    const providerRef = `${providerCode}-${upperCountry}-${Math.floor(100000 + Math.random() * 900000)}`;
-    const activationId = `ACT-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-
-    return {
-      success: true,
-      phoneNumber: allocatedPhone,
-      providerRef,
-      activationId,
-      expiresAt,
-    };
   }
 
   /**
-   * Generates genuine, service-specific SMS verification content and OTP
-   * adhering strictly to official telecom and app format specifications.
+   * Check real SMS verification code from provider API.
+   * Never fabricates codes. Returns actual code if received or 'Waiting for SMS'.
    */
-  static getServiceSms(serviceName: string): { smsCode: string; fullSms: string; sender: string } {
-    const sName = (serviceName || '').toLowerCase();
-
-    if (sName.includes('signal')) {
-      const code1 = Math.floor(100 + Math.random() * 900);
-      const code2 = Math.floor(100 + Math.random() * 900);
-      const smsCode = `${code1}-${code2}`;
-      return {
-        smsCode,
-        fullSms: `Your Signal verification code: ${smsCode}. Do not share this code with anyone.`,
-        sender: 'Signal',
-      };
-    }
-
-    if (sName.includes('whatsapp')) {
-      const code1 = Math.floor(100 + Math.random() * 900);
-      const code2 = Math.floor(100 + Math.random() * 900);
-      const smsCode = `${code1}-${code2}`;
-      const raw = `${code1}${code2}`;
-      return {
-        smsCode,
-        fullSms: `Your WhatsApp code: ${smsCode}. You can also tap on this link to verify your phone: v.whatsapp.com/${raw}`,
-        sender: 'WhatsApp',
-      };
-    }
-
-    if (sName.includes('telegram')) {
-      const smsCode = Math.floor(10000 + Math.random() * 90000).toString();
-      return {
-        smsCode,
-        fullSms: `Telegram code: ${smsCode}. You can also tap here to log in to your account: https://t.me/login/${smsCode}`,
-        sender: 'Telegram',
-      };
-    }
-
-    if (sName.includes('google') || sName.includes('gmail') || sName.includes('youtube')) {
-      const numCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode: numCode,
-        fullSms: `G-${numCode} is your Google verification code.`,
-        sender: 'Google',
-      };
-    }
-
-    if (sName.includes('openai') || sName.includes('chatgpt')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `Your OpenAI verification code is ${smsCode}. Valid for 10 minutes.`,
-        sender: 'OpenAI',
-      };
-    }
-
-    if (sName.includes('tiktok')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `[TikTok] ${smsCode} is your verification code. Valid for 5 minutes.`,
-        sender: 'TikTok',
-      };
-    }
-
-    if (sName.includes('twitter') || sName.includes(' x ')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `Your Twitter confirmation code is ${smsCode}.`,
-        sender: 'Twitter',
-      };
-    }
-
-    if (sName.includes('instagram')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `${smsCode} is your Instagram code. Don't share it.`,
-        sender: 'Instagram',
-      };
-    }
-
-    if (sName.includes('facebook') || sName.includes('fb')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `${smsCode} is your Facebook confirmation code.`,
-        sender: 'Facebook',
-      };
-    }
-
-    if (sName.includes('discord')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `Your Discord verification code is: ${smsCode}`,
-        sender: 'Discord',
-      };
-    }
-
-    if (sName.includes('paypal')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `PayPal: Your security code is ${smsCode}. Your code expires in 10 minutes. Please don't reply.`,
-        sender: 'PayPal',
-      };
-    }
-
-    if (sName.includes('cash app') || sName.includes('cashapp')) {
-      const code1 = Math.floor(100 + Math.random() * 900);
-      const code2 = Math.floor(100 + Math.random() * 900);
-      const smsCode = `${code1}-${code2}`;
-      return {
-        smsCode,
-        fullSms: `Cash App: ${smsCode} is your sign-in code.`,
-        sender: 'Cash App',
-      };
-    }
-
-    if (sName.includes('apple') || sName.includes('icloud')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `Your Apple ID Code is: ${smsCode}. Don't share it with anyone.`,
-        sender: 'Apple',
-      };
-    }
-
-    if (sName.includes('netflix')) {
-      const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-      return {
-        smsCode,
-        fullSms: `Your Netflix verification code is ${smsCode}.`,
-        sender: 'Netflix',
-      };
-    }
-
-    // Standard high-reliability fallback for any other service
-    const smsCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const cleanName = serviceName.replace(/\(.*?\)/g, '').trim() || 'Service';
-    return {
-      smsCode,
-      fullSms: `Your verification code for ${cleanName} is ${smsCode}. Valid for 10 minutes.`,
-      sender: cleanName,
-    };
-  }
-
-  /**
-   * Check SMS status for an active virtual number order.
-   * If upstream provider is configured, polls upstream API.
-   * Delivers accurate, real SMS code and full message once dispatched.
-   */
-  static checkSms(
+  static async checkVirtualNumberSms(
     provider: ProviderConfig,
-    order: any,
-    forceReceive: boolean = false
-  ): {
-    status: 'Waiting for SMS' | 'Received';
+    providerOrderId: string,
+    phoneNumber?: string
+  ): Promise<{
+    success: boolean;
+    status: 'Received' | 'Waiting for SMS' | 'Expired' | 'Error';
     smsCode?: string;
     fullSms?: string;
-    sender?: string;
-    phoneNumber?: string;
-    receivedAt?: string;
-  } {
-    // 1. If code already received, return immediately
-    if (
-      order.delivery?.smsCode && 
-      order.delivery.smsCode !== 'Waiting for SMS...' && 
-      order.delivery.smsCode.trim() !== ''
-    ) {
+    message?: string;
+    rawResponse?: any;
+  }> {
+    if (!provider.apiKey || provider.apiKey.trim() === '') {
       return {
-        status: 'Received',
-        smsCode: order.delivery.smsCode,
-        fullSms: order.delivery.fullSms,
-        sender: order.delivery.sender || 'Service',
-        phoneNumber: order.delivery.phoneNumber,
-        receivedAt: order.delivery.receivedAt || new Date().toISOString(),
+        success: false,
+        status: 'Error',
+        message: `Provider API Key is not configured for ${provider.name}.`,
       };
     }
 
-    const orderTime = new Date(order.createdAt).getTime();
-    const ageSeconds = (Date.now() - orderTime) / 1000;
+    const cleanBaseUrl = provider.baseUrl.replace(/\/$/, '');
+    const cleanApiKey = provider.apiKey.trim();
 
-    // Delivery rule: Deliver code when forceReceive is true OR after 3 seconds of activation
-    // This allows customer to enter number on their app, then receive the authentic verification SMS
-    if (forceReceive || ageSeconds >= 3) {
-      const svcName = order.productName || order.serviceType || 'Virtual Number';
-      const smsData = this.getServiceSms(svcName);
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+      let targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/status`;
+      const headers: Record<string, string> = {
+        'Accept': 'application/json',
+        'User-Agent': 'Stevelogs-Virtual-Numbers/2.0',
+      };
+
+      if (provider.id === 'nova') {
+        targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/sms`;
+        headers['Authorization'] = `Bearer ${cleanApiKey}`;
+      } else if (provider.id === 'benotp') {
+        targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/status`;
+        headers['Authorization'] = `Bearer ${cleanApiKey}`;
+        headers['X-API-KEY'] = cleanApiKey;
+      }
+
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      }).catch((err) => {
+        if (err.name === 'AbortError') throw new Error('SMS check timed out');
+        throw err;
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return {
+          success: false,
+          status: 'Error',
+          message: `Upstream ${provider.name} responded with HTTP ${response.status}`,
+        };
+      }
+
+      const data = await response.json().catch(() => ({}));
+      const code = data.sms_code || data.code || data.sms || data.data?.sms_code || data.data?.code;
+      const fullMessage = data.full_sms || data.message || data.text || data.data?.message || (code ? `Your verification code is ${code}` : undefined);
+
+      if (code) {
+        return {
+          success: true,
+          status: 'Received',
+          smsCode: String(code).trim(),
+          fullSms: fullMessage,
+          rawResponse: data,
+        };
+      }
+
+      if (data.status === 'expired' || data.status === 'cancelled') {
+        return {
+          success: true,
+          status: 'Expired',
+          message: 'Number has expired or was cancelled by provider.',
+          rawResponse: data,
+        };
+      }
+
       return {
-        status: 'Received',
-        smsCode: smsData.smsCode,
-        fullSms: smsData.fullSms,
-        sender: smsData.sender,
-        phoneNumber: order.delivery?.phoneNumber,
-        receivedAt: new Date().toISOString(),
+        success: true,
+        status: 'Waiting for SMS',
+        rawResponse: data,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        status: 'Error',
+        message: err.message || 'Failed to check SMS from provider',
       };
     }
-
-    return {
-      status: 'Waiting for SMS',
-      phoneNumber: order.delivery?.phoneNumber,
-    };
   }
 }
-

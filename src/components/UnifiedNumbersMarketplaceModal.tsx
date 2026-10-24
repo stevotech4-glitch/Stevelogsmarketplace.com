@@ -26,20 +26,18 @@ interface UnifiedNumbersMarketplaceModalProps {
   isOpen: boolean;
   onClose: () => void;
   wallet: UserWallet;
-  customer?: CustomerRecord | null;
   onOrderSuccess: (order: any) => void;
-  onOrderRefund?: (newBalance: number) => void;
   initialServiceCategory?: 'usa' | 'all';
+  customer?: CustomerRecord | null;
 }
 
 export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceModalProps> = ({
   isOpen,
   onClose,
   wallet,
-  customer,
   onOrderSuccess,
-  onOrderRefund,
   initialServiceCategory = 'usa',
+  customer,
 }) => {
   // Step 1: Category selection ('usa' | 'all')
   const [serviceCategory, setServiceCategory] = useState<'usa' | 'all'>(initialServiceCategory);
@@ -77,7 +75,6 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
   const [activeOrder, setActiveOrder] = useState<any | null>(null);
   const [copiedNumber, setCopiedNumber] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedFullSms, setCopiedFullSms] = useState(false);
   const [checkingSms, setCheckingSms] = useState(false);
   const [smsCountdown, setSmsCountdown] = useState<number>(600); // 10 minutes
   const [cancellingOrder, setCancellingOrder] = useState(false);
@@ -134,26 +131,15 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
     }
   }, [isOpen, initialServiceCategory]);
 
-  // Auto-polling for incoming SMS verification codes & Countdown timer
+  // Countdown timer for active order
   useEffect(() => {
-    let countdownInterval: any;
-    let pollInterval: any;
-
-    if (activeOrder && (!activeOrder.delivery?.smsCode || activeOrder.delivery?.smsCode === 'Waiting for SMS...')) {
-      countdownInterval = setInterval(() => {
+    let interval: any;
+    if (activeOrder && activeOrder.delivery?.smsCode === 'Waiting for SMS...') {
+      interval = setInterval(() => {
         setSmsCountdown((prev) => (prev > 0 ? prev - 1 : 0));
       }, 1000);
-
-      // Auto-poll every 2.5 seconds so incoming SMS codes appear instantly
-      pollInterval = setInterval(() => {
-        handleCheckSms(false);
-      }, 2500);
     }
-
-    return () => {
-      if (countdownInterval) clearInterval(countdownInterval);
-      if (pollInterval) clearInterval(pollInterval);
-    };
+    return () => clearInterval(interval);
   }, [activeOrder]);
 
   if (!isOpen) return null;
@@ -255,29 +241,37 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
     setError(null);
 
     const serverLabel = serviceCategory === 'usa' ? `USA Server ${selectedServer}` : `Server ${selectedServer}`;
-    const activeCustomerId = customer?.id || 'CUST-1001';
-    const activeCustomerName = customer?.name || 'Customer';
+    const effectiveCustId = customer?.id || localStorage.getItem('stevelogs_customer_id') || 'CUST-1001';
+    const effectiveCustName = customer?.name || 'Customer';
+    const token = localStorage.getItem('stevelogs_customer_token');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-customer-id': effectiveCustId,
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+      headers['x-customer-token'] = token;
+    }
 
     try {
       const res = await fetch('/api/orders/create', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-customer-id': activeCustomerId,
-          'x-wallet-balance': String(wallet.balance),
-        },
+        headers,
         body: JSON.stringify({
-          customerId: activeCustomerId,
-          customerName: activeCustomerName,
-          walletBalance: wallet.balance,
+          customerId: effectiveCustId,
+          customerName: effectiveCustName,
           serviceType: serviceCategory === 'usa' ? 'USA Numbers' : 'All Countries Numbers',
           productName: `${selectedOffer.serviceName} (${selectedOffer.countryName})`,
           amount: selectedOffer.sellingPrice,
+          idempotencyKey: `ord_${effectiveCustId}_${selectedOffer.id}_${Date.now()}`,
           details: {
             offerId: selectedOffer.id,
             dialCode: selectedOffer.dialCode,
             countryCode: selectedOffer.countryCode,
             serviceId: selectedOffer.serviceId,
+            serviceName: selectedOffer.serviceName,
+            countryName: selectedOffer.countryName,
             serverName: serverLabel,
           },
         }),
@@ -301,23 +295,20 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
   };
 
   // Check SMS / Refresh OTP
-  const handleCheckSms = async (force: boolean = false) => {
+  const handleCheckSms = async () => {
     if (!activeOrder) return;
     setCheckingSms(true);
     try {
-      const res = await fetch(`/api/orders/${activeOrder.id}/sms${force ? '?force=true' : ''}`);
+      const res = await fetch(`/api/orders/${activeOrder.id}/sms`);
       if (res.ok) {
         const data = await res.json();
-        if (data.smsCode && data.smsCode !== 'Waiting for SMS...') {
+        if (data.smsCode) {
           setActiveOrder((prev: any) => ({
             ...prev,
-            status: 'Completed',
             delivery: {
               ...prev.delivery,
               smsCode: data.smsCode,
               fullSms: data.fullSms || prev.delivery?.fullSms,
-              sender: data.sender || prev.delivery?.sender,
-              receivedAt: data.receivedAt,
             },
           }));
         }
@@ -342,12 +333,8 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
         },
       });
       if (res.ok) {
-        const d = await res.json();
         setActiveOrder(null);
         setError('Order cancelled successfully. Full amount has been refunded to your wallet.');
-        if (onOrderRefund && typeof d.newBalance === 'number') {
-          onOrderRefund(d.newBalance);
-        }
         fetchOffers();
       } else {
         const d = await res.json();
@@ -720,7 +707,7 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => handleCheckSms(true)}
+                    onClick={handleCheckSms}
                     disabled={checkingSms}
                     className="px-3 py-1.5 rounded-xl bg-white border border-emerald-200 text-xs font-bold text-emerald-900 hover:bg-emerald-100 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
@@ -798,50 +785,6 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
                     )}
                   </div>
                 </div>
-              </div>
-
-              {/* Actual Incoming Provider SMS Content Box */}
-              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-2.5 border border-slate-800 shadow-sm">
-                <div className="flex items-center justify-between text-[11px] font-mono">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2.5 h-2.5 rounded-full ${activeOrder.delivery?.smsCode ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
-                    <span className="font-bold text-slate-200">
-                      Incoming SMS Content: {activeOrder.delivery?.sender || activeOrder.productName.split(' ')[0] || 'Service'}
-                    </span>
-                  </div>
-                  <span className="text-slate-400">
-                    {activeOrder.delivery?.smsCode ? 'Delivered via Upstream Provider' : 'Listening on live telecom gateway...'}
-                  </span>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono leading-relaxed select-all">
-                  {activeOrder.delivery?.fullSms ? (
-                    <span className="text-emerald-300 font-semibold">{activeOrder.delivery.fullSms}</span>
-                  ) : (
-                    <span className="text-slate-400 italic">
-                      Waiting for verification SMS to arrive... (Auto-polling every 2.5s)
-                    </span>
-                  )}
-                </div>
-
-                {activeOrder.delivery?.fullSms && (
-                  <div className="flex items-center justify-between pt-1">
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      Received at: {activeOrder.delivery?.receivedAt ? new Date(activeOrder.delivery.receivedAt).toLocaleTimeString() : 'Just now'}
-                    </span>
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(activeOrder.delivery?.fullSms || '');
-                        setCopiedFullSms(true);
-                        setTimeout(() => setCopiedFullSms(false), 2000);
-                      }}
-                      className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[11px] font-sans font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      {copiedFullSms ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedFullSms ? 'Copied Full Message' : 'Copy Full SMS'}</span>
-                    </button>
-                  </div>
-                )}
               </div>
 
               {/* Order Footer & Auto-refund option */}

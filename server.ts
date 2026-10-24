@@ -11,7 +11,6 @@ import { db, hashPasscode, verifyPasscode } from './src/server/db';
 import { ProviderService } from './src/server/providers';
 import { RakibSocialsClient } from './src/server/rakibClient';
 import { FlutterwaveService } from './src/server/flutterwaveService';
-import type { Transaction } from './src/types';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -74,6 +73,27 @@ export const isValidAdminRequest = (req: Request): boolean => {
   }
   return true;
 };
+
+export const inFlightPurchases = new Set<string>();
+
+export const extractCustomerId = (req: Request): string | null => {
+  const headerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string) || (req.body?.customerId as string);
+  if (headerId && headerId.trim().startsWith('CUST-')) return headerId.trim();
+
+  const authHeader = (req.headers['authorization'] as string) || (req.headers['x-customer-token'] as string);
+  if (authHeader) {
+    const rawToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+    try {
+      const decoded = Buffer.from(rawToken, 'base64').toString('utf8');
+      const [extractedId] = decoded.split(':');
+      if (extractedId && extractedId.startsWith('CUST-')) {
+        return extractedId;
+      }
+    } catch {}
+  }
+  return null;
+};
+
 
 export const requireAdminAuth = (req: Request, res: Response, next: NextFunction) => {
   const token = extractAdminToken(req);
@@ -873,8 +893,11 @@ app.get('/api/orders', (req: Request, res: Response) => {
     return;
   }
 
+  const customerId = extractCustomerId(req);
+  const filtered = customerId ? orders.filter((o) => o.customerId === customerId) : orders;
+
   // Customer safe orders: strips providerId, providerRef, providerCost, profit
-  const sanitized = orders.map((o) => ({
+  const sanitized = filtered.map((o) => ({
     id: o.id,
     customerId: o.customerId,
     customerName: o.customerName,
@@ -890,127 +913,169 @@ app.get('/api/orders', (req: Request, res: Response) => {
 });
 
 app.post('/api/orders/create', async (req: Request, res: Response) => {
-  const { customerId, customerName, providerId, serviceType, productName, amount, providerCost, walletBalance, details } = req.body;
+  const { customerId: bodyCustId, customerName: bodyCustName, providerId, serviceType, productName, amount, providerCost, details, idempotencyKey } = req.body;
 
   if (!serviceType || !productName) {
     res.status(400).json({ error: 'Missing required order parameters.' });
     return;
   }
 
-  // Server Routing Resolution:
-  // USA Numbers:
-  // Server 1 & 2 -> BenOTP USA
-  // Server 3, 4, 5 -> Nova Solution USA
-  // All Countries Numbers:
-  // Server 1 & 2 -> BenOTP All Countries
-  // Server 3, 4, 5, 6 -> Nova Solution All Countries
-  let resolvedProvider: 'benotp' | 'nova' | 'rakib' | 'internal' = providerId || 'benotp';
-  const serverName = details?.serverName || '';
-  if (serverName.includes('USA Server 1') || serverName.includes('USA Server 2') || serverName === 'Server 1' || serverName === 'Server 2') {
-    resolvedProvider = 'benotp';
-  } else if (
-    serverName.includes('USA Server 3') || serverName.includes('USA Server 4') || serverName.includes('USA Server 5') ||
-    serverName.includes('Server 3') || serverName.includes('Server 4') || serverName.includes('Server 5') || serverName.includes('Server 6')
-  ) {
-    resolvedProvider = 'nova';
-  } else if (serviceType === 'Log Accounts') {
-    const logOffer = db.getLogOffers().find((l) => l.productName === productName || l.id === details?.offerId);
-    if (logOffer) {
-      resolvedProvider = logOffer.providerId;
-    }
+  const effectiveCustId = extractCustomerId(req) || bodyCustId || 'CUST-1001';
+  let cust = db.getCustomer(effectiveCustId);
+  if (!cust) {
+    cust = db.getCustomers()[0];
   }
 
-  // Backend price verification - NEVER trust client-submitted prices
-  let verifiedAmount = Number(amount) || 1500;
-  let verifiedCost = Number(providerCost) || Math.round(verifiedAmount * 0.7);
+  // Idempotency / Concurrency protection
+  const lockKey = `${cust.id}:${serviceType}:${productName}:${idempotencyKey || details?.offerId || 'default'}`;
+  if (inFlightPurchases.has(lockKey)) {
+    res.status(409).json({ error: 'A purchase request for this service is currently in progress. Please wait a moment.' });
+    return;
+  }
 
-  if (details?.offerId) {
-    const rawOffers = db.getNumberOffers();
-    const baseId = details.offerId.replace(/-s\d+$/, '');
-    const matchedNumber = rawOffers.find((o) => o.id === baseId || o.id === details.offerId);
-    if (matchedNumber) {
-      const calc = db.calculateSellingPrice(matchedNumber.providerCost, matchedNumber.providerId, matchedNumber.id);
-      verifiedAmount = calc.sellingPrice;
-      verifiedCost = calc.providerCost;
-      resolvedProvider = matchedNumber.providerId;
-    } else {
-      const matchedLog = db.getLogOffers().find((l) => l.id === details.offerId || l.productName === productName);
-      if (matchedLog) {
-        const calc = db.calculateSellingPrice(matchedLog.providerCost, matchedLog.providerId, matchedLog.id);
-        verifiedAmount = calc.sellingPrice;
-        verifiedCost = calc.providerCost;
-        resolvedProvider = matchedLog.providerId;
+  inFlightPurchases.add(lockKey);
+  try {
+    // Server Routing Resolution according to Requirement 7:
+    let resolvedProvider: 'benotp' | 'nova' | 'rakib' | 'internal' = providerId || 'benotp';
+    const serverName = details?.serverName || '';
+    if (serverName.includes('USA Server 1') || serverName.includes('USA Server 2') || serverName === 'Server 1' || serverName === 'Server 2') {
+      resolvedProvider = 'benotp';
+    } else if (
+      serverName.includes('USA Server 3') || serverName.includes('USA Server 4') || serverName.includes('USA Server 5') ||
+      serverName.includes('Server 3') || serverName.includes('Server 4') || serverName.includes('Server 5') || serverName.includes('Server 6')
+    ) {
+      resolvedProvider = 'nova';
+    } else if (serviceType === 'Log Accounts') {
+      const logOffer = db.getLogOffers().find((l) => l.productName === productName || l.id === details?.offerId);
+      if (logOffer) {
+        resolvedProvider = logOffer.providerId;
       }
     }
+
+    // Backend price verification - NEVER trust client-submitted prices
+    let verifiedAmount = Number(amount) || 1500;
+    let verifiedCost = Number(providerCost) || Math.round(verifiedAmount * 0.7);
+
+    if (details?.offerId) {
+      const rawOffers = db.getNumberOffers();
+      const baseId = details.offerId.replace(/-s\d+$/, '');
+      const matchedNumber = rawOffers.find((o) => o.id === baseId || o.id === details.offerId);
+      if (matchedNumber) {
+        const calc = db.calculateSellingPrice(matchedNumber.providerCost, matchedNumber.providerId, matchedNumber.id);
+        verifiedAmount = calc.sellingPrice;
+        verifiedCost = calc.providerCost;
+        resolvedProvider = matchedNumber.providerId;
+      } else {
+        const matchedLog = db.getLogOffers().find((l) => l.id === details.offerId || l.productName === productName);
+        if (matchedLog) {
+          const calc = db.calculateSellingPrice(matchedLog.providerCost, matchedLog.providerId, matchedLog.id);
+          verifiedAmount = calc.sellingPrice;
+          verifiedCost = calc.providerCost;
+          resolvedProvider = matchedLog.providerId;
+        }
+      }
+    }
+
+    // Check customer balance
+    if (cust.walletBalance < verifiedAmount) {
+      res.status(400).json({
+        error: `Insufficient balance. Required ₦${verifiedAmount.toLocaleString()}, available ₦${cust.walletBalance.toLocaleString()}. Please fund your wallet.`,
+        code: 'INSUFFICIENT_BALANCE',
+      });
+      return;
+    }
+
+    // Real Virtual Number Provider Integration
+    const isVirtualNumberOrder = serviceType.includes('Numbers');
+    let realDelivery: any = undefined;
+    let providerOrderId: string | undefined = undefined;
+
+    if (isVirtualNumberOrder) {
+      const provider = db.getProvider(resolvedProvider);
+      if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
+        const pName = provider?.name || resolvedProvider.toUpperCase();
+        res.status(400).json({
+          error: `Provider credentials required: An API Key has not been configured for ${pName}. Please add your ${pName} API Key in Admin Dashboard -> Providers to connect to real virtual numbers.`,
+          code: 'PROVIDER_CREDENTIALS_REQUIRED',
+        });
+        return;
+      }
+
+      // Query real provider API
+      const orderResult = await ProviderService.orderVirtualNumber(provider, {
+        serviceName: details?.serviceName || productName,
+        serviceId: details?.serviceId,
+        countryIso: details?.countryCode || 'US',
+        countryName: details?.countryName,
+        serverName: serverName || details?.serverName,
+      });
+
+      if (!orderResult.success || !orderResult.phoneNumber) {
+        res.status(400).json({
+          error: orderResult.error || `Failed to allocate real virtual number from ${provider.name}.`,
+          code: orderResult.code || 'PROVIDER_ORDER_FAILED',
+        });
+        return;
+      }
+
+      realDelivery = {
+        phoneNumber: orderResult.phoneNumber,
+        smsCode: null,
+        fullSms: null,
+        status: 'Waiting for SMS',
+        providerName: provider.name,
+      };
+      providerOrderId = orderResult.providerOrderId;
+    }
+
+    // Create order and atomically deduct wallet balance only after real delivery is confirmed
+    const result = db.createOrder({
+      customerId: cust.id,
+      customerName: cust.name,
+      providerId: resolvedProvider,
+      serviceType,
+      productName,
+      amount: verifiedAmount,
+      providerCost: verifiedCost,
+      details: {
+        ...details,
+        serverName: serverName || (serviceType === 'USA Numbers' ? 'USA Server 1' : 'Server 1'),
+      },
+      delivery: realDelivery,
+      providerRef: providerOrderId,
+      status: realDelivery ? 'Waiting for SMS' : undefined,
+    });
+
+    if (!result.success) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+
+    const customerSafeOrder = {
+      id: result.order.id,
+      customerId: result.order.customerId,
+      serviceType: result.order.serviceType,
+      productName: result.order.productName,
+      amount: result.order.amount,
+      status: result.order.status,
+      delivery: result.order.delivery,
+      createdAt: result.order.createdAt,
+      serverRoute: result.order.details?.serverName || 'Verified Server',
+    };
+
+    res.json(customerSafeOrder);
+  } finally {
+    inFlightPurchases.delete(lockKey);
   }
-
-  const clientWalletBalance = typeof walletBalance === 'number' && !isNaN(walletBalance)
-    ? walletBalance
-    : Number(req.headers['x-wallet-balance']);
-
-  const activeCustomerId = customerId || (req.headers['x-customer-id'] as string) || 'CUST-1001';
-
-  const result = await db.createOrder({
-    customerId: activeCustomerId,
-    customerName: customerName || 'Customer',
-    providerId: resolvedProvider,
-    serviceType,
-    productName,
-    amount: verifiedAmount,
-    providerCost: verifiedCost,
-    walletBalance: !isNaN(clientWalletBalance) ? clientWalletBalance : undefined,
-    details: {
-      ...details,
-      serverName: serverName || (serviceType === 'USA Numbers' ? 'USA Server 1' : 'Server 1'),
-    },
-  });
-
-  if (!result.success) {
-    res.status(400).json({ error: result.error });
-    return;
-  }
-
-  // Return customer safe order details (hiding internal provider details)
-  const customerSafeOrder = {
-    id: result.order.id,
-    customerId: result.order.customerId,
-    serviceType: result.order.serviceType,
-    productName: result.order.productName,
-    amount: result.order.amount,
-    status: result.order.status,
-    delivery: result.order.delivery,
-    createdAt: result.order.createdAt,
-    serverRoute: result.order.details?.serverName || 'Verified Server',
-    newWalletBalance: result.newBalance,
-  };
-
-  res.json(customerSafeOrder);
 });
 
-// Order Refund / Cancellation Endpoint
-// Accessible by Admin OR by customer for unreceived SMS numbers (Auto-Refund)
-app.post('/api/orders/:id/refund', (req: Request, res: Response) => {
+app.post('/api/orders/:id/refund', requireAdminAuth, (req: Request, res: Response) => {
   const { id } = req.params;
-  const actor = (req.headers['x-admin-actor'] as string) || 'Customer Auto-Refund';
-  const order = db.getOrders().find((o) => o.id === id);
-
-  if (!order) {
-    res.status(404).json({ success: false, error: 'Order not found.' });
-    return;
-  }
-
-  const isAdmin = isValidAdminRequest(req);
-  const isPendingSms = order.status === 'Waiting for SMS' || order.delivery?.smsCode === 'Waiting for SMS...' || !order.delivery?.smsCode;
-
-  // Customers can auto-refund their pending virtual numbers if SMS was not yet received
-  if (!isAdmin && !isPendingSms && order.status !== 'Pending') {
-    res.status(403).json({ success: false, error: 'Completed or fulfilled orders require administrative review for refunds.' });
-    return;
-  }
+  const actor = req.headers['x-admin-actor'] as string || 'Admin';
 
   const result = db.refundOrder(id, actor);
   if (!result.success) {
-    res.status(400).json({ success: false, error: result.message });
+    res.status(400).json({ error: result.message });
     return;
   }
 
@@ -1166,7 +1231,7 @@ app.get('/api/telegram/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.get('/api/orders/:id/sms', (req: Request, res: Response) => {
+app.get('/api/orders/:id/sms', async (req: Request, res: Response) => {
   const { id } = req.params;
   const orders = db.getOrders();
   const order = orders.find((o) => o.id === id);
@@ -1175,145 +1240,109 @@ app.get('/api/orders/:id/sms', (req: Request, res: Response) => {
     return;
   }
 
-  // If order already has a received SMS code, return it instantly
-  if (
-    order.delivery?.smsCode && 
-    order.delivery.smsCode !== 'Waiting for SMS...' && 
-    order.delivery.smsCode.trim() !== ''
-  ) {
+  // If SMS already received, return it immediately
+  if (order.delivery?.smsCode) {
     res.json({
       orderId: order.id,
       phoneNumber: order.delivery.phoneNumber,
       smsCode: order.delivery.smsCode,
       fullSms: order.delivery.fullSms,
-      sender: order.delivery.sender || 'Service',
       status: 'Received',
-      receivedAt: order.delivery.receivedAt,
     });
     return;
   }
 
-  // Check or deliver via ProviderService
-  const force = req.query.force === 'true';
-  const provider = db.getProvider(order.providerId) || db.getProviders()[0];
-  const smsResult = ProviderService.checkSms(provider, order, force);
+  // Query upstream provider for real SMS if providerRef exists
+  if (order.providerRef && order.providerId) {
+    const provider = db.getProvider(order.providerId);
+    if (provider && provider.apiKey && provider.apiKey.trim() !== '') {
+      const smsCheck = await ProviderService.checkVirtualNumberSms(
+        provider,
+        order.providerRef,
+        order.delivery?.phoneNumber
+      );
 
-  if (smsResult.smsCode) {
-    if (!order.delivery) order.delivery = {};
-    order.delivery.smsCode = smsResult.smsCode;
-    order.delivery.fullSms = smsResult.fullSms;
-    order.delivery.sender = smsResult.sender;
-    order.delivery.receivedAt = smsResult.receivedAt || new Date().toISOString();
-    order.delivery.status = 'Delivered';
-    order.status = 'Completed';
-    db.scheduleSave();
+      if (smsCheck.success && smsCheck.smsCode) {
+        order.delivery = {
+          ...order.delivery,
+          smsCode: smsCheck.smsCode,
+          fullSms: smsCheck.fullSms || `Your verification code is ${smsCheck.smsCode}`,
+        };
+        order.status = 'Successful';
+        db.scheduleSave();
+
+        res.json({
+          orderId: order.id,
+          phoneNumber: order.delivery?.phoneNumber,
+          smsCode: smsCheck.smsCode,
+          fullSms: smsCheck.fullSms,
+          status: 'Received',
+        });
+        return;
+      }
+
+      if (smsCheck.status === 'Expired') {
+        order.status = 'Expired';
+        db.scheduleSave();
+        res.json({
+          orderId: order.id,
+          phoneNumber: order.delivery?.phoneNumber,
+          smsCode: null,
+          status: 'Expired',
+          message: smsCheck.message || 'Number session has expired at provider.',
+        });
+        return;
+      }
+    }
   }
 
   res.json({
     orderId: order.id,
     phoneNumber: order.delivery?.phoneNumber,
-    smsCode: order.delivery?.smsCode || null,
-    fullSms: order.delivery?.fullSms || null,
-    sender: order.delivery?.sender || null,
-    status: order.delivery?.smsCode ? 'Received' : 'Waiting for SMS',
-    receivedAt: order.delivery?.receivedAt,
+    smsCode: null,
+    fullSms: null,
+    status: 'Waiting for SMS',
   });
-});
-
-// Real-Time Webhook for incoming SMS from providers (BenOTP, Nova, etc.)
-app.post('/api/webhooks/sms', (req: Request, res: Response) => {
-  const { phoneNumber, number, sms, fullSms, code, smsCode, orderId } = req.body;
-  const targetPhone = phoneNumber || number;
-  const targetCode = code || smsCode;
-  const targetSms = fullSms || sms;
-
-  const orders = db.getOrders();
-  const order = orders.find((o) => 
-    (orderId && o.id === orderId) || 
-    (targetPhone && o.delivery?.phoneNumber && o.delivery.phoneNumber.replace(/[^\d]/g, '') === targetPhone.replace(/[^\d]/g, ''))
-  );
-
-  if (order) {
-    if (!order.delivery) order.delivery = {};
-    if (targetCode) order.delivery.smsCode = targetCode;
-    if (targetSms) order.delivery.fullSms = targetSms;
-    order.delivery.receivedAt = new Date().toISOString();
-    order.delivery.status = 'Delivered';
-    order.status = 'Completed';
-    db.scheduleSave();
-    res.json({ success: true, orderId: order.id, message: 'SMS received and assigned to order.' });
-    return;
-  }
-
-  res.status(404).json({ success: false, error: 'Matching active order not found.' });
-});
-
-// Wallet Balance Synchronization Endpoint
-app.post('/api/wallet/sync', (req: Request, res: Response) => {
-  const customerId = (req.headers['x-customer-id'] as string) || req.body.customerId || 'CUST-1001';
-  const balance = Number(req.body.balance);
-  if (isNaN(balance) || balance < 0) {
-    res.status(400).json({ success: false, error: 'Valid numerical balance is required.' });
-    return;
-  }
-  const updatedBalance = db.syncCustomerWallet(customerId, balance, 'Customer Session Sync');
-  res.json({ success: true, balance: updatedBalance, wallet: db.getWallet() });
-});
-
-// Wallet Balance Crediting Endpoint
-app.post('/api/wallet/credit', (req: Request, res: Response) => {
-  const customerId = (req.headers['x-customer-id'] as string) || req.body.customerId || 'CUST-1001';
-  const amount = Number(req.body.amount);
-  const description = req.body.description || 'Wallet Deposit';
-  if (isNaN(amount) || amount <= 0) {
-    res.status(400).json({ success: false, error: 'Valid positive deposit amount required.' });
-    return;
-  }
-
-  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
-  cust.walletBalance += amount;
-  cust.totalDeposited += amount;
-  cust.lastActive = new Date().toISOString();
-  db.updateWallet({ balance: cust.walletBalance });
-
-  const tx: Transaction = {
-    id: `tx-${Date.now()}`,
-    reference: `SL-DEP-${Math.floor(10000 + Math.random() * 90000)}`,
-    service: 'Wallet Deposit',
-    description,
-    amount,
-    type: 'credit',
-    status: 'Successful',
-    date: 'Just now',
-    customerId: cust.id,
-  };
-  db.getTransactions().unshift(tx);
-
-  db.addAuditLog({
-    actor: cust.name,
-    action: 'Wallet Credited',
-    category: 'WALLET',
-    details: `Credited ₦${amount.toLocaleString()} [${description}]`,
-    status: 'Success',
-  });
-
-  db.scheduleSave();
-  res.json({ success: true, balance: cust.walletBalance, customer: cust });
 });
 
 // Legacy endpoint compat for modals
 app.post('/api/orders/world-number', async (req: Request, res: Response) => {
-  const { countryCode, countryName, serviceName, price, walletBalance } = req.body;
-  const result = await db.createOrder({
-    customerId: 'CUST-1001',
-    customerName: 'Stevo Tech',
-    providerId: 'benotp', // default prioritized
+  const { countryCode, countryName, serviceName, price } = req.body;
+  const customerId = extractCustomerId(req) || 'CUST-1001';
+  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
+  const provider = db.getProvider('benotp');
+
+  if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
+    res.status(400).json({ message: 'Provider credentials required: Please enter an API key for BenOTP in Admin Settings -> Providers to purchase real virtual numbers.' });
+    return;
+  }
+
+  const orderResult = await ProviderService.orderVirtualNumber(provider, {
+    serviceName: serviceName || 'Telegram',
+    countryIso: countryCode || 'US',
+    countryName: countryName || 'World',
+  });
+
+  if (!orderResult.success || !orderResult.phoneNumber) {
+    res.status(400).json({ message: orderResult.error || 'Failed to allocate virtual number from BenOTP.' });
+    return;
+  }
+
+  const result = db.createOrder({
+    customerId: cust.id,
+    customerName: cust.name,
+    providerId: 'benotp',
     serviceType: 'Virtual Numbers',
     productName: `${countryName || 'World'} Number (${serviceName})`,
     amount: Number(price || 1200),
     providerCost: Number(price ? price * 0.75 : 900),
-    walletBalance: typeof walletBalance === 'number' ? walletBalance : undefined,
     details: { countryCode, serviceName },
+    delivery: {
+      phoneNumber: orderResult.phoneNumber,
+      smsCode: null,
+      status: 'Waiting for SMS',
+    },
+    providerRef: orderResult.providerOrderId,
   });
 
   if (!result.success) {
@@ -1323,24 +1352,49 @@ app.post('/api/orders/world-number', async (req: Request, res: Response) => {
 
   res.json({
     phoneNumber: result.order.delivery.phoneNumber,
-    code: result.order.delivery.smsCode,
-    status: 'Waiting',
-    newBalance: result.newBalance,
+    code: null,
+    status: 'Waiting for SMS',
   });
 });
 
 app.post('/api/orders/usa-number', async (req: Request, res: Response) => {
-  const { serviceName, price, walletBalance } = req.body;
-  const result = await db.createOrder({
-    customerId: 'CUST-1001',
-    customerName: 'Stevo Tech',
+  const { serviceName, price } = req.body;
+  const customerId = extractCustomerId(req) || 'CUST-1001';
+  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
+  const provider = db.getProvider('nova');
+
+  if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
+    res.status(400).json({ message: 'Provider credentials required: Please enter an API key for Nova Solution in Admin Settings -> Providers to purchase real virtual numbers.' });
+    return;
+  }
+
+  const orderResult = await ProviderService.orderVirtualNumber(provider, {
+    serviceName: serviceName || 'Telegram',
+    countryIso: 'US',
+    countryName: 'United States',
+    serverName: 'USA Server 3',
+  });
+
+  if (!orderResult.success || !orderResult.phoneNumber) {
+    res.status(400).json({ message: orderResult.error || 'Failed to allocate USA virtual number from Nova Solution.' });
+    return;
+  }
+
+  const result = db.createOrder({
+    customerId: cust.id,
+    customerName: cust.name,
     providerId: 'nova',
     serviceType: 'USA Numbers',
     productName: `USA Number (${serviceName})`,
     amount: Number(price || 1800),
     providerCost: Number(price ? price * 0.75 : 1350),
-    walletBalance: typeof walletBalance === 'number' ? walletBalance : undefined,
     details: { serviceName },
+    delivery: {
+      phoneNumber: orderResult.phoneNumber,
+      smsCode: null,
+      status: 'Waiting for SMS',
+    },
+    providerRef: orderResult.providerOrderId,
   });
 
   if (!result.success) {
@@ -1350,9 +1404,8 @@ app.post('/api/orders/usa-number', async (req: Request, res: Response) => {
 
   res.json({
     phoneNumber: result.order.delivery.phoneNumber,
-    code: result.order.delivery.smsCode,
-    status: 'Waiting',
-    newBalance: result.newBalance,
+    code: null,
+    status: 'Waiting for SMS',
   });
 });
 
@@ -1497,7 +1550,7 @@ app.get('/api/boosting/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/boosting/purchase', async (req: Request, res: Response) => {
+app.post('/api/boosting/purchase', (req: Request, res: Response) => {
   const { server, itemId, quantity, targetLink } = req.body;
   if (!itemId || !quantity || !targetLink) {
     res.status(400).json({ error: 'Missing required boosting campaign parameters.' });
@@ -1514,7 +1567,7 @@ app.post('/api/boosting/purchase', async (req: Request, res: Response) => {
   const totalAmount = Math.max(500, Math.round((Number(quantity) / 1000) * ratePer1k));
   const providerCost = Math.round(totalAmount * 0.7);
 
-  const result = await db.createOrder({
+  const result = db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'rakib',
@@ -1658,7 +1711,7 @@ app.get('/api/proxies/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/proxies/purchase', async (req: Request, res: Response) => {
+app.post('/api/proxies/purchase', (req: Request, res: Response) => {
   const { planId, proxyType, gateId, quantity, location, duration } = req.body;
   const customerId = (req.body.customerId as string) || (req.headers['x-customer-id'] as string) || 'CUST-1001';
   const cust = db.getCustomer(customerId) || db.getCustomers()[0];
@@ -1688,7 +1741,7 @@ app.post('/api/proxies/purchase', async (req: Request, res: Response) => {
   const proxyHost = pType === 'mobile' ? '162.254.120.55' : (pType === 'datacenter' ? '198.51.100.72' : '162.254.120.44');
   const proxyEndpoint = `${proxyHost}:${proxyPort}:${proxyUser}:${proxyPass}`;
 
-  const result = await db.createOrder({
+  const result = db.createOrder({
     customerId: cust.id,
     customerName: cust.name,
     providerId: 'nova',
@@ -1840,7 +1893,7 @@ app.get('/api/esim/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/esim/purchase', async (req: Request, res: Response) => {
+app.post('/api/esim/purchase', (req: Request, res: Response) => {
   const { productId, server, country, email } = req.body;
   const price = 4500;
   const providerCost = 3150;
@@ -1848,7 +1901,7 @@ app.post('/api/esim/purchase', async (req: Request, res: Response) => {
   const orderRef = `SL-ESIM-${Date.now().toString().slice(-6)}`;
   const activationCode = `LPA:1$smdp.stevelogs.com$${orderRef}`;
 
-  const result = await db.createOrder({
+  const result = db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'nova',
@@ -1979,7 +2032,7 @@ app.get('/api/giftcards/orders', (req: Request, res: Response) => {
   res.json(sanitized);
 });
 
-app.post('/api/giftcards/purchase', async (req: Request, res: Response) => {
+app.post('/api/giftcards/purchase', (req: Request, res: Response) => {
   const { productId, countryIso, denomination, recipientEmail, recipientPhone } = req.body;
   const denom = Number(denomination) || 25;
   const rate = 1680;
@@ -1987,7 +2040,7 @@ app.post('/api/giftcards/purchase', async (req: Request, res: Response) => {
   const providerCost = Math.round(totalNgn * 0.9);
   const code = `SL-GC-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
-  const result = await db.createOrder({
+  const result = db.createOrder({
     customerId: 'CUST-1001',
     customerName: 'Stevo Tech',
     providerId: 'nova',
@@ -2029,8 +2082,11 @@ app.get('/api/transactions', (req: Request, res: Response) => {
     return;
   }
 
+  const customerId = extractCustomerId(req);
+  const filtered = customerId ? txs.filter((t) => t.customerId === customerId) : txs;
+
   // Customer safe transactions: strip providerId and mask upstream prefixes
-  const customerSafeTxs = txs.map((t) => ({
+  const customerSafeTxs = filtered.map((t) => ({
     id: t.id,
     reference: t.reference ? t.reference.replace(/^(BENOTP|NOVA|RAKIB)-/i, 'SL-') : `SL-${t.id.slice(-6)}`,
     service: t.service,
@@ -2045,7 +2101,26 @@ app.get('/api/transactions', (req: Request, res: Response) => {
   res.json(customerSafeTxs);
 });
 
-app.get('/api/wallet', (_req: Request, res: Response) => {
+app.get('/api/wallet', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  if (customerId) {
+    const cust = db.getCustomer(customerId);
+    if (cust) {
+      const globalWallet = db.getWallet();
+      res.json({
+        balance: cust.walletBalance,
+        totalFunded: cust.totalDeposited,
+        totalSpent: cust.totalSpent,
+        bonus: 0,
+        currency: 'NGN',
+        customerId: cust.id,
+        bankName: globalWallet.bankName,
+        accountNumber: globalWallet.accountNumber,
+        accountName: globalWallet.accountName,
+      });
+      return;
+    }
+  }
   res.json(db.getWallet());
 });
 

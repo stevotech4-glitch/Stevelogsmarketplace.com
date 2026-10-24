@@ -31,13 +31,14 @@ export const MAIN_SERVICES: ServiceItem[] = [
   { id: 'video-tutorials', name: 'Video Tutorials', iconType: 'video' },
 ];
 
+// Strict No-Fake-Data Policy: Wallet starts at 0 until verified by backend/database
 export const initialWallet: UserWallet = {
-  balance: 25000,
+  balance: 0,
   currency: '₦',
   bonus: 0,
-  accountNumber: '0067100155',
-  bankName: 'Moniepoint MFB',
-  accountName: 'STEVELOGS MARKETPLACE SERVICES',
+  accountNumber: '',
+  bankName: 'Not configured',
+  accountName: 'Not configured',
 };
 
 // Available service catalogues with baseline catalogue pricing

@@ -345,32 +345,6 @@ export default function App() {
       setCurrentCustomer(null);
       localStorage.removeItem('stevelogs_customer_data');
     }
-
-    // Sync active wallet balance with backend
-    fetch('/api/wallet')
-      .then((r) => r.json())
-      .then((backendWallet) => {
-        if (backendWallet && typeof backendWallet.balance === 'number') {
-          setWallet((prev) => {
-            const effectiveBalance = Math.max(prev.balance, backendWallet.balance);
-            if (prev.balance > backendWallet.balance) {
-              fetch('/api/wallet/sync', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ balance: prev.balance }),
-              }).catch(() => {});
-            }
-            return {
-              ...prev,
-              balance: effectiveBalance,
-              accountNumber: backendWallet.accountNumber || prev.accountNumber,
-              bankName: backendWallet.bankName || prev.bankName,
-              accountName: backendWallet.accountName || prev.accountName,
-            };
-          });
-        }
-      })
-      .catch(() => {});
   }, []);
 
   const handleCustomerAuthSuccess = (cust: CustomerRecord) => {
@@ -707,11 +681,10 @@ export default function App() {
   };
 
   // Balance credit helper
-  const handleCreditWallet = async (amount: number, description: string) => {
-    const newBal = wallet.balance + amount;
+  const handleCreditWallet = (amount: number, description: string) => {
     setWallet((prev) => ({
       ...prev,
-      balance: newBal,
+      balance: prev.balance + amount,
     }));
 
     const newTx: Transaction = {
@@ -726,23 +699,6 @@ export default function App() {
     };
 
     setTransactions((prev) => [newTx, ...prev]);
-
-    try {
-      await fetch('/api/wallet/credit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-customer-id': currentCustomer?.id || 'CUST-1001',
-        },
-        body: JSON.stringify({
-          customerId: currentCustomer?.id || 'CUST-1001',
-          amount,
-          description,
-        }),
-      });
-    } catch (e) {
-      console.warn('Backend wallet credit sync notice:', e);
-    }
   };
 
   // Admin Controls Handlers
@@ -1292,27 +1248,11 @@ export default function App() {
         wallet={wallet}
         customer={currentCustomer}
         onOrderSuccess={(order) => {
-          // Sync wallet with server-calculated new balance
-          if (typeof order.newWalletBalance === 'number') {
-            setWallet((prev) => ({ ...prev, balance: order.newWalletBalance }));
-          } else {
-            setWallet((prev) => ({ ...prev, balance: Math.max(0, prev.balance - order.amount) }));
-          }
-
-          const newTx: Transaction = {
-            id: `tx-${Date.now()}`,
-            reference: order.id,
-            service: 'Virtual Numbers',
-            description: `${order.productName} (${order.serverRoute || 'Verified Server'})`,
-            amount: order.amount,
-            type: 'debit',
-            status: 'Successful',
-            date: 'Just now',
-          };
-          setTransactions((prev) => [newTx, ...prev]);
-        }}
-        onOrderRefund={(newBalance) => {
-          setWallet((prev) => ({ ...prev, balance: newBalance }));
+          handleDeductBalance(
+            order.amount,
+            'Virtual Numbers',
+            `${order.productName} (${order.details?.serverName || 'Verified Server'})`
+          );
         }}
       />
 

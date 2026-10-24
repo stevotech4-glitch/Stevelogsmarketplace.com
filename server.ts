@@ -75,10 +75,16 @@ export const isValidAdminRequest = (req: Request): boolean => {
 };
 
 export const inFlightPurchases = new Set<string>();
+export const inFlightApprovals = new Set<string>();
 
 export const extractCustomerId = (req: Request): string | null => {
   const headerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string) || (req.body?.customerId as string);
-  if (headerId && headerId.trim().startsWith('CUST-')) return headerId.trim();
+  if (headerId && typeof headerId === 'string' && headerId.trim()) {
+    const trimmed = headerId.trim();
+    if (trimmed.toUpperCase().startsWith('CUST-')) return trimmed.toUpperCase();
+    const match = db.getCustomer(trimmed);
+    if (match) return match.id;
+  }
 
   const authHeader = (req.headers['authorization'] as string) || (req.headers['x-customer-token'] as string);
   if (authHeader) {
@@ -86,13 +92,85 @@ export const extractCustomerId = (req: Request): string | null => {
     try {
       const decoded = Buffer.from(rawToken, 'base64').toString('utf8');
       const [extractedId] = decoded.split(':');
-      if (extractedId && extractedId.startsWith('CUST-')) {
-        return extractedId;
+      if (extractedId) {
+        if (extractedId.toUpperCase().startsWith('CUST-')) return extractedId.toUpperCase();
+        const match = db.getCustomer(extractedId);
+        if (match) return match.id;
       }
     } catch {}
   }
   return null;
 };
+
+// ==========================================
+// REAL-TIME EVENT STREAMING (SSE HUB)
+// ==========================================
+interface RealtimeClient {
+  id: string;
+  customerId: string;
+  res: Response;
+  connectedAt: number;
+}
+
+class RealtimeHub {
+  private clients: Map<string, RealtimeClient> = new Map();
+
+  addClient(customerId: string, res: Response): string {
+    const clientId = `client-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    this.clients.set(clientId, {
+      id: clientId,
+      customerId,
+      res,
+      connectedAt: Date.now(),
+    });
+    return clientId;
+  }
+
+  removeClient(clientId: string) {
+    this.clients.delete(clientId);
+  }
+
+  sendToCustomer(customerId: string, event: string, data: any) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const targetIdNorm = (customerId || '').trim().toLowerCase();
+    for (const [clientId, client] of this.clients.entries()) {
+      if (client.customerId.trim().toLowerCase() === targetIdNorm) {
+        try {
+          client.res.write(payload);
+          if (typeof (client.res as any).flush === 'function') {
+            (client.res as any).flush();
+          }
+        } catch (e) {
+          this.clients.delete(clientId);
+        }
+      }
+    }
+  }
+
+  broadcast(event: string, data: any) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const [clientId, client] of this.clients.entries()) {
+      try {
+        client.res.write(payload);
+      } catch (e) {
+        this.clients.delete(clientId);
+      }
+    }
+  }
+
+  heartbeat() {
+    for (const [clientId, client] of this.clients.entries()) {
+      try {
+        client.res.write(':keepalive\n\n');
+      } catch (e) {
+        this.clients.delete(clientId);
+      }
+    }
+  }
+}
+
+export const realtimeHub = new RealtimeHub();
+setInterval(() => realtimeHub.heartbeat(), 25000);
 
 
 export const requireAdminAuth = (req: Request, res: Response, next: NextFunction) => {
@@ -855,6 +933,21 @@ app.post('/api/customers/:id/adjust-balance', requireAdminAuth, (req: Request, r
     ...result.customer,
     transaction: result.transaction,
   });
+});
+
+app.get('/api/transactions', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  const isAdmin = isValidAdminRequest(req);
+  const allTx = db.getTransactions();
+
+  if (isAdmin && !customerId) {
+    res.json(allTx);
+    return;
+  }
+
+  const targetId = customerId || (req.query.customerId as string);
+  const filtered = targetId ? allTx.filter((t) => t.customerId === targetId) : allTx;
+  res.json(filtered);
 });
 
 app.get('/api/customers/:id/transactions', (req: Request, res: Response) => {
@@ -3053,13 +3146,40 @@ app.post('/api/admin/payments/manual-requests/:id/approve', requireAdminAuth, (r
   const { approvedAmount, adminNotes } = req.body;
   const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
 
-  const result = db.approveManualPaymentRequest(id, approvedAmount, actor, adminNotes);
-  if (!result.success) {
-    res.status(400).json(result);
+  if (inFlightApprovals.has(id)) {
+    res.status(409).json({ success: false, error: 'Payment approval is already being processed. Please wait.' });
     return;
   }
 
-  res.json(result);
+  inFlightApprovals.add(id);
+  try {
+    const result = db.approveManualPaymentRequest(id, approvedAmount, actor, adminNotes);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    // Real-time instant notification broadcast to customer
+    if (result.customer) {
+      realtimeHub.sendToCustomer(result.customer.id, 'payment_approved', {
+        type: 'PAYMENT_APPROVED',
+        notification: result.notification,
+        wallet: {
+          balance: result.customer.walletBalance,
+          totalFunded: result.customer.totalDeposited,
+          totalSpent: result.customer.totalSpent,
+          currency: 'NGN',
+        },
+        approvedAmount: result.request?.approvedAmount || result.request?.amount,
+        newBalance: result.customer.walletBalance,
+        reference: result.request?.reference,
+      });
+    }
+
+    res.json(result);
+  } finally {
+    inFlightApprovals.delete(id);
+  }
 });
 
 // 7. Admin endpoint: Reject manual payment request with optional reason
@@ -3068,13 +3188,138 @@ app.post('/api/admin/payments/manual-requests/:id/reject', requireAdminAuth, (re
   const { reason } = req.body;
   const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
 
-  const result = db.rejectManualPaymentRequest(id, reason, actor);
-  if (!result.success) {
-    res.status(400).json(result);
+  if (inFlightApprovals.has(id)) {
+    res.status(409).json({ success: false, error: 'Payment rejection is already being processed. Please wait.' });
     return;
   }
 
-  res.json(result);
+  inFlightApprovals.add(id);
+  try {
+    const result = db.rejectManualPaymentRequest(id, reason, actor);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    if (result.request) {
+      realtimeHub.sendToCustomer(result.request.customerId, 'payment_rejected', {
+        type: 'PAYMENT_REJECTED',
+        notification: result.notification,
+        reference: result.request.reference,
+        rejectionReason: result.request.rejectionReason,
+      });
+    }
+
+    res.json(result);
+  } finally {
+    inFlightApprovals.delete(id);
+  }
+});
+
+// ==========================================
+// REAL-TIME NOTIFICATIONS & SSE STREAMING
+// ==========================================
+
+// 1. SSE Stream for Logged-In Customer
+app.get('/api/realtime/events', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  if (!customerId) {
+    res.status(401).json({ error: 'Customer ID required for real-time events.' });
+    return;
+  }
+
+  // Set SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const clientId = realtimeHub.addClient(customerId, res);
+
+  // Send initial handshake
+  res.write(`event: connected\ndata: ${JSON.stringify({ connected: true, customerId, timestamp: new Date().toISOString() })}\n\n`);
+
+  req.on('close', () => {
+    realtimeHub.removeClient(clientId);
+  });
+});
+
+// 2. Instant Customer Sync (Balance, Unshown Popups, and Notifications)
+app.get('/api/customer/sync', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  if (!customerId) {
+    res.status(401).json({ error: 'Customer ID required.' });
+    return;
+  }
+
+  const cust = db.getCustomer(customerId);
+  if (!cust) {
+    res.status(404).json({ error: 'Customer not found.' });
+    return;
+  }
+
+  const unshownPopups = db.getUnshownPopups(customerId);
+  const allNotifications = db.getCustomerNotifications(customerId);
+  const unreadCount = allNotifications.filter((n) => !n.read).length;
+  const recentTransactions = db.getTransactions().filter((t) => t.customerId === customerId).slice(0, 10);
+  const pendingRequests = db.getManualPaymentRequests(customerId, 'Pending Approval');
+
+  res.json({
+    success: true,
+    customerId: cust.id,
+    wallet: {
+      balance: cust.walletBalance,
+      currency: 'NGN',
+      totalFunded: cust.totalDeposited,
+      totalSpent: cust.totalSpent,
+      bonus: 0,
+      accountNumber: cust.virtualAccount?.accountNumber || db.getWallet().accountNumber,
+      bankName: cust.virtualAccount?.bankName || db.getWallet().bankName,
+      accountName: cust.virtualAccount?.accountName || db.getWallet().accountName,
+    },
+    unshownPopups,
+    unreadCount,
+    pendingRequestsCount: pendingRequests.length,
+    recentTransactions,
+  });
+});
+
+// 3. Customer Notifications list
+app.get('/api/notifications', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  if (!customerId) {
+    res.status(401).json({ error: 'Customer ID required.' });
+    return;
+  }
+  const notifications = db.getCustomerNotifications(customerId);
+  res.json(notifications);
+});
+
+// 4. Mark single notification popup as shown
+app.post('/api/notifications/:id/shown', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const success = db.markNotificationPopUpShown(id);
+  res.json({ success });
+});
+
+// 5. Mark single notification as read
+app.post('/api/notifications/:id/read', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const success = db.markNotificationRead(id);
+  res.json({ success });
+});
+
+// 6. Mark all notifications as read
+app.post('/api/notifications/mark-all-read', (req: Request, res: Response) => {
+  const customerId = extractCustomerId(req);
+  if (!customerId) {
+    res.status(401).json({ error: 'Customer ID required.' });
+    return;
+  }
+  const success = db.markAllNotificationsRead(customerId);
+  res.json({ success });
 });
 
 // 9. Automated Requirement 14 Verification Test Suite

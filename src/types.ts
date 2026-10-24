@@ -826,3 +826,21 @@ export interface SpecialMarketplaceOrder {
   purchasedAt: string;
 }
 
+// ==========================================
+// REAL-TIME NOTIFICATIONS
+// ==========================================
+export interface CustomerNotification {
+  id: string;
+  customerId: string;
+  type: 'PAYMENT_APPROVED' | 'PAYMENT_REJECTED' | 'ORDER_COMPLETED' | 'GENERAL';
+  title: string;
+  message: string;
+  amount?: number;
+  newBalance?: number;
+  reference?: string;
+  read: boolean;
+  popUpShown: boolean;
+  createdAt: string;
+}
+
+

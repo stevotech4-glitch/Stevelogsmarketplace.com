@@ -29,7 +29,8 @@ import {
   SpecialMarketplaceListing,
   PublicSpecialListing,
   SpecialMarketplaceOrder,
-  ManualPaymentRequest
+  ManualPaymentRequest,
+  CustomerNotification
 } from '../types';
 import { generateMasterNumberOffers, generateMasterLogOffers } from './catalogData';
 
@@ -59,6 +60,7 @@ export interface DatabaseState {
   specialListings: SpecialMarketplaceListing[];
   specialOrders: SpecialMarketplaceOrder[];
   manualPaymentRequests: ManualPaymentRequest[];
+  notifications: CustomerNotification[];
 }
 
 const DB_FILE_PATH = path.resolve(process.cwd(), 'data', 'stevelogs_db.json');
@@ -722,6 +724,7 @@ class Database {
             : INITIAL_SPECIAL_LISTINGS,
           specialOrders: parsed.specialOrders || [],
           manualPaymentRequests: parsed.manualPaymentRequests || [],
+          notifications: parsed.notifications || [],
         };
 
         if (
@@ -782,6 +785,7 @@ class Database {
       specialListings: INITIAL_SPECIAL_LISTINGS,
       specialOrders: [],
       manualPaymentRequests: [],
+      notifications: [],
     };
 
     this.saveImmediate(defaultState);
@@ -1095,7 +1099,11 @@ class Database {
   }
 
   getCustomer(id: string): CustomerRecord | undefined {
-    return this.state.customers.find((c) => c.id === id);
+    if (!id) return undefined;
+    const clean = id.trim();
+    return this.state.customers.find(
+      (c) => c.id === clean || c.id.toLowerCase() === clean.toLowerCase() || c.email.toLowerCase() === clean.toLowerCase()
+    );
   }
 
   adjustCustomerBalance(
@@ -2694,6 +2702,7 @@ class Database {
     customer?: CustomerRecord;
     payment?: PaymentRecord;
     transaction?: Transaction;
+    notification?: CustomerNotification;
   } {
     if (!this.state.payments) this.state.payments = [];
     let payment = this.state.payments.find(
@@ -2842,8 +2851,27 @@ class Database {
       status: 'Success',
     });
 
+    // Create Persistent Real-Time Customer Notification
+    const notifMessage = `Your wallet has been credited with ₦${payment.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your new balance is ₦${cust.walletBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your funds are now available to use.`;
+    const notification: CustomerNotification = {
+      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      customerId: cust.id,
+      type: 'PAYMENT_APPROVED',
+      title: 'Payment Approved!',
+      message: notifMessage,
+      amount: payment.amount,
+      newBalance: cust.walletBalance,
+      reference: payment.reference,
+      read: false,
+      popUpShown: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (!this.state.notifications) this.state.notifications = [];
+    this.state.notifications.unshift(notification);
+
     this.scheduleSave();
-    return { success: true, customer: cust, payment, transaction: tx };
+    return { success: true, customer: cust, payment, transaction: tx, notification };
   }
 
   markPaymentFailed(reference: string, reason: string): PaymentRecord | null {
@@ -3492,6 +3520,7 @@ class Database {
     success: boolean;
     request?: ManualPaymentRequest;
     customer?: CustomerRecord;
+    notification?: CustomerNotification;
     error?: string;
   } {
     if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
@@ -3562,6 +3591,25 @@ class Database {
       this.state.transactions.unshift(tx);
     }
 
+    // Create Persistent Real-Time Customer Notification
+    const notifMessage = `Your wallet has been credited with ₦${finalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your new balance is ₦${cust.walletBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your funds are now available to use.`;
+    const notification: CustomerNotification = {
+      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      customerId: cust.id,
+      type: 'PAYMENT_APPROVED',
+      title: 'Payment Approved!',
+      message: notifMessage,
+      amount: finalAmount,
+      newBalance: cust.walletBalance,
+      reference: req.reference,
+      read: false,
+      popUpShown: false,
+      createdAt: now,
+    };
+
+    if (!this.state.notifications) this.state.notifications = [];
+    this.state.notifications.unshift(notification);
+
     this.addAuditLog({
       actor,
       action: 'Manual Payment Approved & Credited',
@@ -3571,7 +3619,7 @@ class Database {
     });
 
     this.scheduleSave();
-    return { success: true, request: req, customer: cust };
+    return { success: true, request: req, customer: cust, notification };
   }
 
   rejectManualPaymentRequest(
@@ -3581,6 +3629,7 @@ class Database {
   ): {
     success: boolean;
     request?: ManualPaymentRequest;
+    notification?: CustomerNotification;
     error?: string;
   } {
     if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
@@ -3609,6 +3658,23 @@ class Database {
       existingTx.description = `Deposit Rejected: ${req.rejectionReason}`;
     }
 
+    // Create Notification
+    const notification: CustomerNotification = {
+      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      customerId: req.customerId,
+      type: 'PAYMENT_REJECTED',
+      title: 'Payment Rejected',
+      message: `Your manual deposit request for ₦${req.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} [Ref: ${req.reference}] was rejected. Reason: ${req.rejectionReason}`,
+      amount: req.amount,
+      reference: req.reference,
+      read: false,
+      popUpShown: false,
+      createdAt: now,
+    };
+
+    if (!this.state.notifications) this.state.notifications = [];
+    this.state.notifications.unshift(notification);
+
     this.addAuditLog({
       actor,
       action: 'Manual Payment Rejected',
@@ -3618,8 +3684,57 @@ class Database {
     });
 
     this.scheduleSave();
-    return { success: true, request: req };
+    return { success: true, request: req, notification };
+  }
+
+  // ==========================================
+  // CUSTOMER NOTIFICATIONS MANAGEMENT
+  // ==========================================
+  getCustomerNotifications(customerId: string): CustomerNotification[] {
+    if (!this.state.notifications) this.state.notifications = [];
+    return this.state.notifications.filter((n) => n.customerId === customerId);
+  }
+
+  getUnshownPopups(customerId: string): CustomerNotification[] {
+    if (!this.state.notifications) this.state.notifications = [];
+    return this.state.notifications.filter((n) => n.customerId === customerId && !n.popUpShown);
+  }
+
+  markNotificationPopUpShown(id: string): boolean {
+    if (!this.state.notifications) this.state.notifications = [];
+    const notif = this.state.notifications.find((n) => n.id === id);
+    if (!notif) return false;
+    notif.popUpShown = true;
+    this.scheduleSave();
+    return true;
+  }
+
+  markNotificationRead(id: string): boolean {
+    if (!this.state.notifications) this.state.notifications = [];
+    const notif = this.state.notifications.find((n) => n.id === id);
+    if (!notif) return false;
+    notif.read = true;
+    notif.popUpShown = true;
+    this.scheduleSave();
+    return true;
+  }
+
+  markAllNotificationsRead(customerId: string): boolean {
+    if (!this.state.notifications) this.state.notifications = [];
+    let modified = false;
+    for (const n of this.state.notifications) {
+      if (n.customerId === customerId && (!n.read || !n.popUpShown)) {
+        n.read = true;
+        n.popUpShown = true;
+        modified = true;
+      }
+    }
+    if (modified) {
+      this.scheduleSave();
+    }
+    return true;
   }
 }
+
 
 export const db = new Database();

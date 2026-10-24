@@ -56630,7 +56630,7 @@
       "status": "Active",
       "tier": "VIP Reseller",
       "joinedAt": "2026-01-15T10:00:00Z",
-      "lastActive": "2026-10-22T07:39:47.861Z",
+      "lastActive": "2026-10-24T09:27:38.056Z",
       "referralCode": "SL-1001",
       "referralLink": "https://stevelogsmarketplace.com/?ref=SL-1001",
       "totalReferrals": 0,
@@ -56689,7 +56689,19 @@
       "referralBalance": 0
     }
   ],
-  "transactions": [],
+  "transactions": [
+    {
+      "id": "tx-1792834047024",
+      "reference": "SL-MAN-71849",
+      "service": "Manual Wallet Adjustment",
+      "description": "Debit: Test cleanup",
+      "amount": 5000,
+      "type": "debit",
+      "status": "Successful",
+      "date": "09:27 AM",
+      "customerId": "CUST-1001"
+    }
+  ],
   "orders": [],
   "telegramPricing": {
     "providerId": "nova",
@@ -56765,6 +56777,76 @@
   },
   "telegramOrders": [],
   "auditLogs": [
+    {
+      "id": "aud-1792834058056-193",
+      "timestamp": "2026-10-24T09:27:38.056Z",
+      "actor": "Super Administrator",
+      "action": "Manual Payment Approved & Credited",
+      "category": "WALLET",
+      "details": "Approved manual deposit [Ref: MAN-DEP-057448-3506] for Stevo Tech (Admin/Owner). Credited ₦2,500 (Prev: ₦0 -> New: ₦2,500)",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834057448-598",
+      "timestamp": "2026-10-24T09:27:37.448Z",
+      "actor": "Stevo Tech (Admin/Owner)",
+      "action": "Manual Payment Request Submitted",
+      "category": "WALLET",
+      "details": "Stevo Tech (Admin/Owner) (CUST-1001) submitted manual transfer of ₦2,500 [Ref: MAN-DEP-057448-3506]",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834057435-275",
+      "timestamp": "2026-10-24T09:27:37.435Z",
+      "actor": "Super Administrator",
+      "action": "Admin Panel Authenticated",
+      "category": "AUTH",
+      "details": "Successful administrator authentication session created from 127.0.0.1.",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834047030-942",
+      "timestamp": "2026-10-24T09:27:27.030Z",
+      "actor": "Super Administrator",
+      "action": "Customer Balance Debited",
+      "category": "WALLET",
+      "details": "Stevo Tech (Admin/Owner) (CUST-1001): ₦5,000 - Reason: Test cleanup [Prev: ₦5,000 -> New: ₦0]",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834046997-552",
+      "timestamp": "2026-10-24T09:27:26.997Z",
+      "actor": "Super Administrator",
+      "action": "Manual Payment Approved & Credited",
+      "category": "WALLET",
+      "details": "Approved manual deposit [Ref: MAN-DEP-046955-6280] for Stevo Tech (Admin/Owner). Credited ₦5,000 (Prev: ₦0 -> New: ₦5,000)",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834046985-743",
+      "timestamp": "2026-10-24T09:27:26.986Z",
+      "actor": "Stevo Tech (Admin/Owner)",
+      "action": "Manual Payment Request Submitted",
+      "category": "WALLET",
+      "details": "Stevo Tech (Admin/Owner) (CUST-1001) submitted manual transfer of ₦5,000 [Ref: MAN-DEP-046955-6280]",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
+    {
+      "id": "aud-1792834046942-328",
+      "timestamp": "2026-10-24T09:27:26.942Z",
+      "actor": "Super Administrator",
+      "action": "Admin Panel Authenticated",
+      "category": "AUTH",
+      "details": "Successful administrator authentication session created from 127.0.0.1.",
+      "ip": "127.0.0.1",
+      "status": "Success"
+    },
     {
       "id": "aud-1792831368948-807",
       "timestamp": "2026-10-24T08:42:48.948Z",
@@ -57108,5 +57190,6 @@
     }
   ],
   "specialOrders": [],
-  "manualPaymentRequests": []
+  "manualPaymentRequests": [],
+  "notifications": []
 }

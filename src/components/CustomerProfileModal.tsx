@@ -18,9 +18,10 @@ import {
   KeyRound,
   Loader2,
   AlertCircle,
-  CheckCircle2
+  CheckCircle2,
+  Bell
 } from 'lucide-react';
-import { UserWallet, Transaction, WebsiteMasterSettings, InterestProgramConfig, CustomerRecord } from '../types';
+import { UserWallet, Transaction, WebsiteMasterSettings, InterestProgramConfig, CustomerRecord, CustomerNotification } from '../types';
 
 interface CustomerProfileModalProps {
   isOpen: boolean;
@@ -32,7 +33,7 @@ interface CustomerProfileModalProps {
   onOpenFundWallet: () => void;
   customer?: CustomerRecord | null;
   onLogout?: () => void;
-  onOpenAuth?: () => void;
+  onOpenAuth?: (mode?: 'login' | 'register') => void;
 }
 
 export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
@@ -47,8 +48,10 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
   onLogout,
   onOpenAuth,
 }) => {
-  const [activeTab, setActiveTab] = useState<'profile' | 'deposits' | 'rewards' | 'security'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'deposits' | 'rewards' | 'notifications' | 'security'>('profile');
   const [copiedBank, setCopiedBank] = useState(false);
+  const [notifications, setNotifications] = useState<CustomerNotification[]>([]);
+  const [loadingNotifications, setLoadingNotifications] = useState(false);
 
   // Change password states
   const [currentPassword, setCurrentPassword] = useState('');
@@ -58,10 +61,36 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
   const [passError, setPassError] = useState<string | null>(null);
   const [passSuccess, setPassSuccess] = useState<string | null>(null);
 
+  React.useEffect(() => {
+    if (isOpen && customer?.id) {
+      setLoadingNotifications(true);
+      fetch('/api/notifications', {
+        headers: { 'x-customer-id': customer.id },
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (Array.isArray(data)) setNotifications(data);
+        })
+        .catch(() => {})
+        .finally(() => setLoadingNotifications(false));
+    }
+  }, [isOpen, customer?.id, activeTab]);
+
   if (!isOpen) return null;
 
   const deposits = transactions.filter((t) => t.type === 'credit');
   const initials = customer?.name ? customer.name.slice(0, 2).toUpperCase() : 'ST';
+
+  const handleMarkAllRead = async () => {
+    if (!customer?.id) return;
+    try {
+      await fetch('/api/notifications/mark-all-read', {
+        method: 'POST',
+        headers: { 'x-customer-id': customer.id },
+      });
+      setNotifications((prev) => prev.map((n) => ({ ...n, read: true, popUpShown: true })));
+    } catch (e) {}
+  };
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -171,6 +200,22 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
               <span>Earnings Yield ({interestProgram.annualRatePercent}%)</span>
             </button>
           )}
+          <button
+            onClick={() => setActiveTab('notifications')}
+            className={`py-3 px-3 text-xs font-bold border-b-2 transition-colors flex items-center gap-1.5 ${
+              activeTab === 'notifications'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Bell className="w-3.5 h-3.5" />
+            <span>Notifications</span>
+            {notifications.filter((n) => !n.read).length > 0 && (
+              <span className="w-4 h-4 rounded-full bg-emerald-500 text-white text-[9px] font-bold flex items-center justify-center">
+                {notifications.filter((n) => !n.read).length}
+              </span>
+            )}
+          </button>
           <button
             onClick={() => setActiveTab('security')}
             className={`py-3 px-3 text-xs font-bold border-b-2 transition-colors ${
@@ -324,6 +369,82 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
               <p className="text-[11px] text-slate-500 italic">
                 {interestProgram.disclaimer}
               </p>
+            </div>
+          )}
+
+          {activeTab === 'notifications' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between pb-1 border-b border-slate-100">
+                <span className="text-xs font-bold text-slate-700">Account Notifications & Approvals</span>
+                {notifications.length > 0 && (
+                  <button
+                    onClick={handleMarkAllRead}
+                    className="text-[11px] font-bold text-blue-600 hover:text-blue-700 cursor-pointer"
+                  >
+                    Mark all as read
+                  </button>
+                )}
+              </div>
+
+              {loadingNotifications ? (
+                <div className="py-10 text-center text-xs text-slate-400">
+                  <Loader2 className="w-4 h-4 animate-spin mx-auto mb-1 text-slate-400" />
+                  <span>Loading notifications...</span>
+                </div>
+              ) : notifications.length === 0 ? (
+                <div className="py-10 text-center text-slate-400 text-xs">
+                  <Bell className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-1" />
+                  <span>No notifications yet.</span>
+                </div>
+              ) : (
+                notifications.map((notif) => (
+                  <div
+                    key={notif.id}
+                    className={`p-3.5 rounded-2xl border transition-all text-xs space-y-1.5 ${
+                      notif.read ? 'bg-slate-50 border-slate-200 text-slate-700' : 'bg-blue-50/50 border-blue-200 text-slate-900 shadow-xs'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {notif.type === 'PAYMENT_APPROVED' ? (
+                          <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                          </div>
+                        ) : notif.type === 'PAYMENT_REJECTED' ? (
+                          <div className="w-6 h-6 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                            <AlertCircle className="w-3.5 h-3.5" />
+                          </div>
+                        ) : (
+                          <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
+                            <Bell className="w-3.5 h-3.5" />
+                          </div>
+                        )}
+                        <span className="font-bold text-slate-900 text-xs">{notif.title}</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {new Date(notif.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-slate-600 leading-relaxed pl-8">
+                      {notif.message}
+                    </p>
+
+                    {notif.amount && (
+                      <div className="pl-8 pt-1 flex items-center gap-3 text-[11px] font-mono">
+                        <span className="font-bold text-emerald-600">
+                          Amount: +₦{notif.amount.toLocaleString()}
+                        </span>
+                        {notif.newBalance !== undefined && (
+                          <span className="text-slate-500 font-medium">
+                            Balance: ₦{notif.newBalance.toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           )}
 

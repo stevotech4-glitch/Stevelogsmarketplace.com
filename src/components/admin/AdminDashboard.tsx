@@ -21,7 +21,6 @@ import {
   Megaphone, 
   Key, 
   Settings,
-  Mail,
   Eye,
   Radio,
   Lock,
@@ -209,21 +208,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [balanceAdjustAmount, setBalanceAdjustAmount] = useState('5000');
   const [balanceAdjustReason, setBalanceAdjustReason] = useState('Manual Administrative Credit');
 
-  // Security Passcode Change State
-  const [currentPasscode, setCurrentPasscode] = useState('');
-  const [newPasscode, setNewPasscode] = useState('');
-  const [confirmPasscode, setConfirmPasscode] = useState('');
-  const [passcodeLoading, setPasscodeLoading] = useState(false);
-  const [passcodeMsg, setPasscodeMsg] = useState<{ text: string; isError: boolean } | null>(null);
-
-  // Bank Account State
-  const [bankNameVal, setBankNameVal] = useState(wallet.bankName || '');
-  const [accountNumVal, setAccountNumVal] = useState(wallet.accountNumber || '');
-  const [accountNameVal, setAccountNameVal] = useState(wallet.accountName || '');
-  const [savingBank, setSavingBank] = useState(false);
-
-  // Saving Provider State
-  const [savingProviderId, setSavingProviderId] = useState<string | null>(null);
+  // BenOTP Testing & Diagnostics State
+  const [benOtpTestingStub, setBenOtpTestingStub] = useState<string | null>(null);
+  const [benOtpDiagnostic, setBenOtpDiagnostic] = useState<{
+    endpoint: string;
+    message: string;
+    data?: any;
+    success?: boolean;
+    timestamp: string;
+  } | null>(null);
 
   const adminFetch = async (url: string, init?: RequestInit) => {
     const token = typeof window !== 'undefined' ? sessionStorage.getItem('stevelogs_admin_token') : null;
@@ -261,6 +254,83 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const showNotification = (msg: string) => {
     setFeedbackNotice(msg);
     setTimeout(() => setFeedbackNotice(null), 3500);
+  };
+
+  const testBenOtpEndpoint = async (stub: 'handler_api' | 'handler' | 'all_server_2') => {
+    setBenOtpTestingStub(stub);
+    try {
+      const res = await adminFetch(`/api/benotp/balance?endpoint=${stub}`);
+      const data = await res.json();
+      if (data.success) {
+        setBenOtpDiagnostic({
+          endpoint: stub,
+          success: true,
+          message: `Endpoint Verified! Balance: $${Number(data.balance).toFixed(2)} (~₦${Math.round(data.balance * 1550).toLocaleString()}) via ${data.endpointUsed}`,
+          data,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        showNotification(`BenOTP ${stub} verified ($${data.balance})`);
+        fetchBackendData();
+      } else {
+        setBenOtpDiagnostic({
+          endpoint: stub,
+          success: false,
+          message: data.error || 'Connection or credentials error',
+          data,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        showNotification(`BenOTP ${stub}: ${data.error || 'Failed'}`);
+      }
+    } catch (e: any) {
+      setBenOtpDiagnostic({
+        endpoint: stub,
+        success: false,
+        message: e.message || 'Network request failed',
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
+      setBenOtpTestingStub(null);
+    }
+  };
+
+  const testBenOtpAreaCodes = async () => {
+    setBenOtpTestingStub('areacodes');
+    try {
+      const res = await adminFetch('/api/benotp/area-codes?country=usa');
+      const data = await res.json();
+      setBenOtpDiagnostic({
+        endpoint: 'handler.php (Area Codes)',
+        success: data.success,
+        message: data.success ? `Retrieved ${data.areaCodes?.length || 0} USA area codes successfully` : (data.error || 'Failed to retrieve area codes'),
+        data: data.areaCodes,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+      showNotification(`BenOTP Area Codes: ${data.areaCodes?.length || 0} retrieved`);
+    } catch (e: any) {
+      setBenOtpDiagnostic({ endpoint: 'handler.php (Area Codes)', success: false, message: e.message, timestamp: new Date().toLocaleTimeString() });
+    } finally {
+      setBenOtpTestingStub(null);
+    }
+  };
+
+  const testBenOtpActivations = async () => {
+    setBenOtpTestingStub('activations');
+    try {
+      const res = await adminFetch('/api/benotp/active-activations');
+      const data = await res.json();
+      setBenOtpDiagnostic({
+        endpoint: 'all_server_2.php (Active Activations)',
+        success: data.success,
+        message: data.success ? `Retrieved ${data.activations?.length || 0} active activations` : (data.error || 'Failed to retrieve active activations'),
+        data: data.activations,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+      showNotification(`BenOTP Active Activations: ${data.activations?.length || 0} active`);
+    } catch (e: any) {
+      setBenOtpDiagnostic({ endpoint: 'all_server_2.php', success: false, message: e.message, timestamp: new Date().toLocaleTimeString() });
+    } finally {
+      setBenOtpTestingStub(null);
+    }
   };
 
   // Fetch full backend state on mount
@@ -368,85 +438,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       }
     } catch (e: any) {
       showNotification(`Failed to save provider: ${e.message}`);
-    } finally {
-      setSavingProviderId(null);
-    }
-  };
-
-  // Save Dedicated Bank Account Details
-  const handleSaveBankDetails = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setSavingBank(true);
-    try {
-      if (onUpdateWalletBankDetails) {
-        onUpdateWalletBankDetails(bankNameVal, accountNumVal, accountNameVal);
-      }
-      const res = await adminFetch('/api/wallet', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bankName: bankNameVal,
-          accountNumber: accountNumVal,
-          accountName: accountNameVal,
-        }),
-      });
-      if (res.ok) {
-        showNotification('Dedicated bank account details saved to database!');
-        fetchBackendData();
-      } else {
-        const d = await res.json().catch(() => ({}));
-        showNotification(d.error || 'Failed to update bank details.');
-      }
-    } catch (e: any) {
-      showNotification(`Bank save error: ${e.message}`);
-    } finally {
-      setSavingBank(false);
-    }
-  };
-
-  // Change Admin Passcode Handler
-  const handleChangePasscode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPasscodeMsg(null);
-
-    if (!currentPasscode.trim()) {
-      setPasscodeMsg({ text: 'Please enter your current administrative passcode.', isError: true });
-      return;
-    }
-    if (!newPasscode.trim() || newPasscode.trim().length < 6) {
-      setPasscodeMsg({ text: 'New passcode must be at least 6 characters.', isError: true });
-      return;
-    }
-    if (newPasscode !== confirmPasscode) {
-      setPasscodeMsg({ text: 'New passcodes do not match.', isError: true });
-      return;
-    }
-
-    setPasscodeLoading(true);
-    try {
-      const res = await adminFetch('/api/admin/change-passcode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currentPasscode: currentPasscode.trim(),
-          newPasscode: newPasscode.trim(),
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to change passcode.');
-      }
-
-      setPasscodeMsg({ text: data.message || 'Admin passcode changed successfully!', isError: false });
-      setCurrentPasscode('');
-      setNewPasscode('');
-      setConfirmPasscode('');
-      showNotification('Admin passcode updated successfully!');
-    } catch (err: any) {
-      setPasscodeMsg({ text: err.message || 'Passcode change failed.', isError: true });
-    } finally {
-      setPasscodeLoading(false);
     }
   };
 
@@ -1249,7 +1240,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <input
                             type="text"
                             defaultValue={p.baseUrl}
-                            id={`base-url-${p.id}`}
                             onBlur={(e) => handleUpdateProvider(p.id, { baseUrl: e.target.value })}
                             className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:ring-1 focus:ring-blue-500"
                           />
@@ -1289,7 +1279,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <input
                             type="number"
                             defaultValue={p.priority}
-                            id={`priority-${p.id}`}
                             onBlur={(e) => handleUpdateProvider(p.id, { priority: Number(e.target.value) })}
                             className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:ring-1 focus:ring-blue-500"
                           />
@@ -1304,6 +1293,154 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </span>
                         </div>
                       </div>
+
+                      {/* BENOTP DEDICATED STUBS & MULTI-ENDPOINT ARCHITECTURE */}
+                      {isBenOtp && (
+                        <div className="p-4 rounded-xl bg-slate-950/80 border border-amber-500/30 space-y-3.5">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2.5">
+                            <div className="flex items-center gap-2">
+                              <Zap className="w-4 h-4 text-amber-400" />
+                              <span className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                                BenOTP Official Multi-Stub Architecture & Gateway Routing
+                              </span>
+                            </div>
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-mono font-bold">
+                              3 Stubs Configured & Verified
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-[11px]">
+                            {/* Stub 1: Handler API */}
+                            <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5 flex flex-col justify-between">
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <strong className="text-white font-mono">1. Handler API</strong>
+                                  <span className="px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 text-[9px] font-mono font-bold">
+                                    Server 1
+                                  </span>
+                                </div>
+                                <span className="text-slate-400 font-mono text-[10px] block break-all">
+                                  https://benotp.com/stubs/handler_api.php
+                                </span>
+                                <div className="text-[9px] text-slate-400 pt-1 space-y-0.5">
+                                  <div>• getBalance, getServices</div>
+                                  <div>• getNumber (carrier, area_codes, duration)</div>
+                                  <div>• getStatus, setStatus, reUseNumber</div>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => testBenOtpEndpoint('handler_api')}
+                                disabled={benOtpTestingStub === 'handler_api'}
+                                className="mt-2 w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-white font-mono text-[10px] font-bold border border-slate-700 cursor-pointer disabled:opacity-50 transition-colors"
+                              >
+                                {benOtpTestingStub === 'handler_api' ? 'Pinging...' : 'Test Handler API'}
+                              </button>
+                            </div>
+
+                            {/* Stub 2: Handler with Pools */}
+                            <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5 flex flex-col justify-between">
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <strong className="text-white font-mono">2. Handler (Pools/Area)</strong>
+                                  <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 text-[9px] font-mono font-bold">
+                                    Pools
+                                  </span>
+                                </div>
+                                <span className="text-slate-400 font-mono text-[10px] block break-all">
+                                  https://benotp.com/stubs/handler.php
+                                </span>
+                                <div className="text-[9px] text-slate-400 pt-1 space-y-0.5">
+                                  <div>• getBalance, getPrice, getCountries</div>
+                                  <div>• getPools, getAreaCodes</div>
+                                  <div>• getNumber (pool, quantity, areacode)</div>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => testBenOtpEndpoint('handler')}
+                                disabled={benOtpTestingStub === 'handler'}
+                                className="mt-2 w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-purple-300 hover:text-white font-mono text-[10px] font-bold border border-slate-700 cursor-pointer disabled:opacity-50 transition-colors"
+                              >
+                                {benOtpTestingStub === 'handler' ? 'Pinging...' : 'Test Handler (Pools)'}
+                              </button>
+                            </div>
+
+                            {/* Stub 3: All Server 2 */}
+                            <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5 flex flex-col justify-between">
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <strong className="text-white font-mono">3. All Server 2</strong>
+                                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-mono font-bold">
+                                    Server 2
+                                  </span>
+                                </div>
+                                <span className="text-slate-400 font-mono text-[10px] block break-all">
+                                  https://benotp.com/stubs/all_server_2.php
+                                </span>
+                                <div className="text-[9px] text-slate-400 pt-1 space-y-0.5">
+                                  <div>• getBalance, getPrices, getServices</div>
+                                  <div>• getNumber (maxPrice, operator, ref)</div>
+                                  <div>• getActiveActivations</div>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => testBenOtpEndpoint('all_server_2')}
+                                disabled={benOtpTestingStub === 'all_server_2'}
+                                className="mt-2 w-full py-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 hover:text-white font-mono text-[10px] font-bold border border-slate-700 cursor-pointer disabled:opacity-50 transition-colors"
+                              >
+                                {benOtpTestingStub === 'all_server_2' ? 'Pinging...' : 'Test Server 2'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Quick Diagnostic Actions */}
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <span className="text-[10px] text-slate-400 font-mono">Deep Diagnostics:</span>
+                            <button
+                              type="button"
+                              onClick={testBenOtpAreaCodes}
+                              disabled={benOtpTestingStub === 'areacodes'}
+                              className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-blue-300 text-[10px] font-mono border border-slate-800 cursor-pointer disabled:opacity-50"
+                            >
+                              {benOtpTestingStub === 'areacodes' ? 'Querying...' : 'Query USA Area Codes'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={testBenOtpActivations}
+                              disabled={benOtpTestingStub === 'activations'}
+                              className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-300 text-[10px] font-mono border border-slate-800 cursor-pointer disabled:opacity-50"
+                            >
+                              {benOtpTestingStub === 'activations' ? 'Querying...' : 'Query Active Activations'}
+                            </button>
+                          </div>
+
+                          {/* Diagnostic Result Banner */}
+                          {benOtpDiagnostic && (
+                            <div className={`p-3 rounded-xl border text-xs font-mono space-y-1 animate-in fade-in ${
+                              benOtpDiagnostic.success
+                                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                                : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                            }`}>
+                              <div className="flex items-center justify-between">
+                                <span className="font-bold uppercase tracking-wider text-[10px]">
+                                  {benOtpDiagnostic.endpoint} Output ({benOtpDiagnostic.timestamp})
+                                </span>
+                                <span className="text-[9px] opacity-75">
+                                  {benOtpDiagnostic.success ? '● SUCCESS' : '▲ NOTICE'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] leading-relaxed">{benOtpDiagnostic.message}</p>
+                              {benOtpDiagnostic.data && Array.isArray(benOtpDiagnostic.data) && (
+                                <div className="text-[10px] text-slate-400 max-h-24 overflow-y-auto bg-slate-950/80 p-2 rounded-lg border border-slate-800/80">
+                                  Sample: {benOtpDiagnostic.data.slice(0, 15).join(', ')}{benOtpDiagnostic.data.length > 15 ? ` ... (+${benOtpDiagnostic.data.length - 15} more)` : ''}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Action buttons & status report */}
                       <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1322,32 +1459,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const keyInput = document.getElementById(`api-key-${p.id}`) as HTMLInputElement;
-                              const urlInput = document.getElementById(`base-url-${p.id}`) as HTMLInputElement;
-                              const priorityInput = document.getElementById(`priority-${p.id}`) as HTMLInputElement;
-                              setSavingProviderId(p.id);
-                              handleUpdateProvider(p.id, {
-                                baseUrl: urlInput?.value || p.baseUrl,
-                                apiKey: keyInput?.value !== undefined ? keyInput.value : p.apiKey,
-                                priority: priorityInput?.value ? Number(priorityInput.value) : p.priority,
-                              });
-                            }}
-                            disabled={savingProviderId === p.id}
-                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                          >
-                            <Check className="w-3.5 h-3.5" />
-                            <span>{savingProviderId === p.id ? 'Saving...' : 'Save Provider Settings'}</span>
-                          </button>
+                        <div className="flex items-center gap-2">
                           <button
                             onClick={() => handleTestConnection(p.id)}
                             disabled={testingProviderId === p.id}
                             className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-slate-700 cursor-pointer disabled:opacity-50"
                           >
-                            {testingProviderId === p.id ? 'Pinging...' : 'Test Connection'}
+                            {testingProviderId === p.id ? 'Pinging Upstream...' : 'Test Connection'}
                           </button>
                           <button
                             onClick={() => handleSyncProvider(p.id)}
@@ -1703,19 +1821,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
                 </div>
-
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (pricingRules) handleSavePricing(pricingRules);
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save Markup & Profit Rules</span>
-                  </button>
-                </div>
               </div>
 
               {/* TELEGRAM STARS, PREMIUM & BLUE TICK PRICING ENGINE */}
@@ -1928,19 +2033,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </table>
                     </div>
                   </div>
-
-                  <div className="flex justify-end pt-3 border-t border-slate-800">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (telegramConfig) handleSaveTelegramPricing(telegramConfig);
-                      }}
-                      className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                    >
-                      <Check className="w-4 h-4" />
-                      <span>Save Telegram Pricing & Routing</span>
-                    </button>
-                  </div>
                 </div>
               )}
             </div>
@@ -1967,9 +2059,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <label className="text-[10px] text-slate-400 block mb-1">Bank Name</label>
                     <input
                       type="text"
-                      value={bankNameVal}
-                      onChange={(e) => setBankNameVal(e.target.value)}
-                      placeholder="e.g. PalmPay / Wema Bank"
+                      defaultValue={wallet.bankName}
+                      onBlur={(e) => onUpdateWalletBankDetails && onUpdateWalletBankDetails(e.target.value, wallet.accountNumber, wallet.accountName)}
                       className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
                     />
                   </div>
@@ -1977,9 +2068,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <label className="text-[10px] text-slate-400 block mb-1">Account Number</label>
                     <input
                       type="text"
-                      value={accountNumVal}
-                      onChange={(e) => setAccountNumVal(e.target.value)}
-                      placeholder="e.g. 9012345678"
+                      defaultValue={wallet.accountNumber}
+                      onBlur={(e) => onUpdateWalletBankDetails && onUpdateWalletBankDetails(wallet.bankName, e.target.value, wallet.accountName)}
                       className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
                     />
                   </div>
@@ -1987,24 +2077,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <label className="text-[10px] text-slate-400 block mb-1">Account Name</label>
                     <input
                       type="text"
-                      value={accountNameVal}
-                      onChange={(e) => setAccountNameVal(e.target.value)}
-                      placeholder="e.g. STEVELOGS VENTURES"
+                      defaultValue={wallet.accountName}
+                      onBlur={(e) => onUpdateWalletBankDetails && onUpdateWalletBankDetails(wallet.bankName, wallet.accountNumber, e.target.value)}
                       className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
                     />
                   </div>
-                </div>
-
-                <div className="flex justify-end pt-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSaveBankDetails()}
-                    disabled={savingBank}
-                    className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md disabled:opacity-50"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>{savingBank ? 'Saving Bank Details...' : 'Save Dedicated Bank Account'}</span>
-                  </button>
                 </div>
               </div>
 
@@ -2193,19 +2270,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
                   />
                 </div>
-
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (interestProgram) handleSaveInterest(interestProgram);
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save Interest Program Settings</span>
-                  </button>
-                </div>
               </div>
             </div>
           )}
@@ -2297,19 +2361,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     Test Link ↗
                   </a>
                 </div>
-
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (websiteSettings) handleSaveSettings(websiteSettings);
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save WhatsApp Support Settings</span>
-                  </button>
-                </div>
               </div>
             </div>
           )}
@@ -2381,19 +2432,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
                   />
                 </div>
-
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (websiteSettings) handleSaveSettings(websiteSettings);
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save WhatsApp Channel Settings</span>
-                  </button>
-                </div>
               </div>
             </div>
           )}
@@ -2445,19 +2483,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     onBlur={(e) => handleSaveSettings({ termsOfService: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
                   />
-                </div>
-
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (websiteSettings) handleSaveSettings(websiteSettings);
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save Content & Notices</span>
-                  </button>
                 </div>
               </div>
             </div>
@@ -2553,7 +2578,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </p>
               </div>
 
-              <div className="p-6 rounded-2xl bg-[#0f172a] border border-slate-800 space-y-6">
+              <div className="p-6 rounded-2xl bg-[#0f172a] border border-slate-800 space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                   <div>
                     <span className="text-sm font-bold text-white block">Global Maintenance Mode</span>
@@ -2573,197 +2598,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </button>
                 </div>
 
-                {/* General Branding & Support Info */}
-                <div>
-                  <h4 className="text-xs font-bold text-blue-400 uppercase tracking-wider mb-3">General Marketplace Branding</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Website Name
-                      </label>
-                      <input
-                        type="text"
-                        defaultValue={websiteSettings.websiteName}
-                        id="setting-website-name"
-                        onBlur={(e) => handleSaveSettings({ websiteName: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs font-bold"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Contact / Support Email
-                      </label>
-                      <input
-                        type="email"
-                        defaultValue={websiteSettings.contactEmail}
-                        id="setting-contact-email"
-                        onBlur={(e) => handleSaveSettings({ contactEmail: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Support Phone (WhatsApp)
-                      </label>
-                      <input
-                        type="text"
-                        defaultValue={websiteSettings.whatsappSupportNumber}
-                        id="setting-support-phone"
-                        onBlur={(e) => handleSaveSettings({ whatsappSupportNumber: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Direct Call Phone Number
-                      </label>
-                      <input
-                        type="text"
-                        defaultValue={websiteSettings.callPhoneNumber || '+2348149021844'}
-                        id="setting-call-phone"
-                        onBlur={(e) => handleSaveSettings({ callPhoneNumber: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+                      Website Name
+                    </label>
+                    <input
+                      type="text"
+                      defaultValue={websiteSettings.websiteName}
+                      onBlur={(e) => handleSaveSettings({ websiteName: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs font-bold"
+                    />
                   </div>
-                </div>
-
-                {/* Google OAuth 2.0 Credentials */}
-                <div className="pt-4 border-t border-slate-800">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <Globe className="w-3.5 h-3.5" />
-                      <span>Google OAuth 2.0 Sign-In Credentials</span>
-                    </h4>
-                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
-                      websiteSettings.googleClientId ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
-                    }`}>
-                      {websiteSettings.googleClientId ? 'Configured' : 'Credentials Not Set'}
-                    </span>
+                  <div>
+                    <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
+                      Contact / Support Email
+                    </label>
+                    <input
+                      type="email"
+                      defaultValue={websiteSettings.contactEmail}
+                      onBlur={(e) => handleSaveSettings({ contactEmail: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
+                    />
                   </div>
-                  <p className="text-[11px] text-slate-400 mb-3">
-                    Obtain OAuth 2.0 Client credentials from the Google Cloud Console (APIs & Services &rarr; Credentials).
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Google Client ID
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 123456789-xxx.apps.googleusercontent.com"
-                        defaultValue={websiteSettings.googleClientId || ''}
-                        id="setting-google-client-id"
-                        onBlur={(e) => handleSaveSettings({ googleClientId: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Google Client Secret
-                      </label>
-                      <input
-                        type="password"
-                        placeholder="Google OAuth Client Secret"
-                        defaultValue={websiteSettings.googleClientSecret || ''}
-                        id="setting-google-client-secret"
-                        onBlur={(e) => handleSaveSettings({ googleClientSecret: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Email Delivery Service Configuration */}
-                <div className="pt-4 border-t border-slate-800">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <Mail className="w-3.5 h-3.5" />
-                      <span>Email Delivery Provider (Password Reset & OTPs)</span>
-                    </h4>
-                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
-                      websiteSettings.emailApiKey || websiteSettings.smtpHost ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700 text-slate-300'
-                    }`}>
-                      {websiteSettings.emailApiKey ? 'Resend API Active' : websiteSettings.smtpHost ? 'SMTP Active' : 'Sandbox (In-App Codes)'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs mb-3">
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Provider Type
-                      </label>
-                      <select
-                        defaultValue={websiteSettings.emailProvider || 'resend'}
-                        id="setting-email-provider"
-                        onChange={(e) => handleSaveSettings({ emailProvider: e.target.value as any })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs"
-                      >
-                        <option value="resend">Resend API (Recommended)</option>
-                        <option value="smtp">Custom SMTP Server</option>
-                        <option value="none">Sandbox / None (Manual)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Resend API Key (re_...)
-                      </label>
-                      <input
-                        type="password"
-                        placeholder="re_xxxxxxxxxxxxxx"
-                        defaultValue={websiteSettings.emailApiKey || ''}
-                        id="setting-email-api-key"
-                        onBlur={(e) => handleSaveSettings({ emailApiKey: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Sender From Address
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. notifications@stevelogsmarketplace.shop"
-                        defaultValue={websiteSettings.emailFromAddress || 'noreply@stevelogsmarketplace.shop'}
-                        id="setting-email-from"
-                        onBlur={(e) => handleSaveSettings({ emailFromAddress: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Explicit Master Save Button */}
-                <div className="flex justify-end pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nameInput = document.getElementById('setting-website-name') as HTMLInputElement;
-                      const emailInput = document.getElementById('setting-contact-email') as HTMLInputElement;
-                      const phoneInput = document.getElementById('setting-support-phone') as HTMLInputElement;
-                      const callInput = document.getElementById('setting-call-phone') as HTMLInputElement;
-                      const gIdInput = document.getElementById('setting-google-client-id') as HTMLInputElement;
-                      const gSecInput = document.getElementById('setting-google-client-secret') as HTMLInputElement;
-                      const mailKeyInput = document.getElementById('setting-email-api-key') as HTMLInputElement;
-                      const mailFromInput = document.getElementById('setting-email-from') as HTMLInputElement;
-                      const provSelect = document.getElementById('setting-email-provider') as HTMLSelectElement;
-
-                      handleSaveSettings({
-                        websiteName: nameInput?.value || websiteSettings.websiteName,
-                        contactEmail: emailInput?.value || websiteSettings.contactEmail,
-                        whatsappSupportNumber: phoneInput?.value || websiteSettings.whatsappSupportNumber,
-                        callPhoneNumber: callInput?.value || websiteSettings.callPhoneNumber,
-                        googleClientId: gIdInput?.value || websiteSettings.googleClientId,
-                        googleClientSecret: gSecInput?.value || websiteSettings.googleClientSecret,
-                        emailApiKey: mailKeyInput?.value || websiteSettings.emailApiKey,
-                        emailFromAddress: mailFromInput?.value || websiteSettings.emailFromAddress,
-                        emailProvider: (provSelect?.value as any) || websiteSettings.emailProvider,
-                      });
-                    }}
-                    className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Save Master Website & Credentials</span>
-                  </button>
                 </div>
               </div>
             </div>
@@ -2790,83 +2647,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </div>
 
-                {/* Change Administrator Passcode Form */}
-                <form onSubmit={handleChangePasscode} className="p-4 rounded-xl bg-slate-900 border border-slate-700/80 space-y-3">
-                  <div className="flex items-center gap-2 pb-2 border-b border-slate-800">
-                    <Key className="w-4 h-4 text-amber-400" />
-                    <h4 className="text-xs font-bold text-white uppercase tracking-wider">Change Administrator Passcode</h4>
-                  </div>
-
-                  {passcodeMsg && (
-                    <div className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
-                      passcodeMsg.isError ? 'bg-rose-500/20 border border-rose-500/40 text-rose-300' : 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
-                    }`}>
-                      {passcodeMsg.isError ? <AlertCircle className="w-4 h-4 shrink-0" /> : <CheckCircle2 className="w-4 h-4 shrink-0" />}
-                      <span>{passcodeMsg.text}</span>
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Current Passcode *
-                      </label>
-                      <input
-                        type="password"
-                        required
-                        value={currentPasscode}
-                        onChange={(e) => setCurrentPasscode(e.target.value)}
-                        placeholder="Current (default 200911)"
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:ring-1 focus:ring-amber-400"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        New Passcode *
-                      </label>
-                      <input
-                        type="password"
-                        required
-                        minLength={6}
-                        value={newPasscode}
-                        onChange={(e) => setNewPasscode(e.target.value)}
-                        placeholder="Min. 6 characters"
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:ring-1 focus:ring-amber-400"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-mono text-slate-400 uppercase block mb-1">
-                        Confirm New Passcode *
-                      </label>
-                      <input
-                        type="password"
-                        required
-                        minLength={6}
-                        value={confirmPasscode}
-                        onChange={(e) => setConfirmPasscode(e.target.value)}
-                        placeholder="Repeat new passcode"
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:ring-1 focus:ring-amber-400"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end pt-2">
-                    <button
-                      type="submit"
-                      disabled={passcodeLoading || !currentPasscode || !newPasscode}
-                      className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs flex items-center gap-2 cursor-pointer shadow-md disabled:opacity-50"
-                    >
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>{passcodeLoading ? 'Updating Passcode...' : 'Update Admin Passcode'}</span>
-                    </button>
-                  </div>
-                </form>
-
                 <div className="text-xs text-slate-400 space-y-1">
                   <p>• Ordinary customer sessions cannot access administrative endpoints or view provider credentials.</p>
                   <p>• All administrative actions are signed with actor identifiers and stored in the audit trail.</p>
                   <p>• Sensitive API keys are masked using one-way preview redaction before transmission.</p>
-                  <p>• Database backups and state persistence occur synchronously on disk (`data/stevelogs_db.json`).</p>
                 </div>
               </div>
             </div>

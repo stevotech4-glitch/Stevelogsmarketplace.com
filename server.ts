@@ -7,10 +7,11 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
-import { db, hashPasscode, verifyPasscode } from './src/server/db';
+import { db, hashPasscode, verifyPasscode, sanitizeCustomer } from './src/server/db';
 import { ProviderService } from './src/server/providers';
 import { RakibSocialsClient } from './src/server/rakibClient';
 import { FlutterwaveService } from './src/server/flutterwaveService';
+import { BenOtpClient, BenOtpEndpointType } from './src/server/benotpClient';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -73,105 +74,6 @@ export const isValidAdminRequest = (req: Request): boolean => {
   }
   return true;
 };
-
-export const inFlightPurchases = new Set<string>();
-export const inFlightApprovals = new Set<string>();
-
-export const extractCustomerId = (req: Request): string | null => {
-  const headerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string) || (req.body?.customerId as string);
-  if (headerId && typeof headerId === 'string' && headerId.trim()) {
-    const trimmed = headerId.trim();
-    if (trimmed.toUpperCase().startsWith('CUST-')) return trimmed.toUpperCase();
-    const match = db.getCustomer(trimmed);
-    if (match) return match.id;
-  }
-
-  const authHeader = (req.headers['authorization'] as string) || (req.headers['x-customer-token'] as string);
-  if (authHeader) {
-    const rawToken = authHeader.replace(/^Bearer\s+/i, '').trim();
-    try {
-      const decoded = Buffer.from(rawToken, 'base64').toString('utf8');
-      const [extractedId] = decoded.split(':');
-      if (extractedId) {
-        if (extractedId.toUpperCase().startsWith('CUST-')) return extractedId.toUpperCase();
-        const match = db.getCustomer(extractedId);
-        if (match) return match.id;
-      }
-    } catch {}
-  }
-  return null;
-};
-
-// ==========================================
-// REAL-TIME EVENT STREAMING (SSE HUB)
-// ==========================================
-interface RealtimeClient {
-  id: string;
-  customerId: string;
-  res: Response;
-  connectedAt: number;
-}
-
-class RealtimeHub {
-  private clients: Map<string, RealtimeClient> = new Map();
-
-  addClient(customerId: string, res: Response): string {
-    const clientId = `client-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-    this.clients.set(clientId, {
-      id: clientId,
-      customerId,
-      res,
-      connectedAt: Date.now(),
-    });
-    return clientId;
-  }
-
-  removeClient(clientId: string) {
-    this.clients.delete(clientId);
-  }
-
-  sendToCustomer(customerId: string, event: string, data: any) {
-    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    const targetIdNorm = (customerId || '').trim().toLowerCase();
-    for (const [clientId, client] of this.clients.entries()) {
-      if (client.customerId.trim().toLowerCase() === targetIdNorm) {
-        try {
-          client.res.write(payload);
-          if (typeof (client.res as any).flush === 'function') {
-            (client.res as any).flush();
-          }
-        } catch (e) {
-          this.clients.delete(clientId);
-        }
-      }
-    }
-  }
-
-  broadcast(event: string, data: any) {
-    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const [clientId, client] of this.clients.entries()) {
-      try {
-        client.res.write(payload);
-      } catch (e) {
-        this.clients.delete(clientId);
-      }
-    }
-  }
-
-  heartbeat() {
-    for (const [clientId, client] of this.clients.entries()) {
-      try {
-        client.res.write(':keepalive\n\n');
-      } catch (e) {
-        this.clients.delete(clientId);
-      }
-    }
-  }
-}
-
-export const realtimeHub = new RealtimeHub();
-setInterval(() => realtimeHub.heartbeat(), 25000);
-
 
 export const requireAdminAuth = (req: Request, res: Response, next: NextFunction) => {
   const token = extractAdminToken(req);
@@ -641,253 +543,148 @@ app.get('/api/admin/providers/rakib/balance', requireAdminAuth, async (_req: Req
 // CUSTOMER AUTH & DATA SEPARATION
 // ==========================================
 app.post('/api/auth/register', (req: Request, res: Response) => {
-  const result = db.registerCustomer(req.body);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
+  try {
+    const result = db.registerCustomer(req.body);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Auth Register Error]:', err);
+    res.status(500).json({ success: false, error: err.message || 'Server error during registration.' });
   }
-  res.json(result);
 });
 
 app.post('/api/auth/login', (req: Request, res: Response) => {
-  const { identifier, username, email, phone, password } = req.body;
-  const loginId = identifier || email || phone || username;
-  const result = db.authenticateCustomer(loginId, password);
-  if (!result.success) {
-    res.status(401).json(result);
-    return;
+  try {
+    const { identifier, username, email, phone, password } = req.body;
+    const loginId = identifier || email || phone || username;
+    const result = db.authenticateCustomer(loginId, password);
+    if (!result.success) {
+      res.status(401).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Auth Login Error]:', err);
+    res.status(500).json({ success: false, error: err.message || 'Server error during login.' });
   }
-  res.json(result);
-});
-
-app.get('/api/auth/google/config', (req: Request, res: Response) => {
-  const settings = db.getSettings();
-  const googleClientId = process.env.GOOGLE_CLIENT_ID || settings.googleClientId || '';
-  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const baseUrl = process.env.APP_URL || `${protocol}://${host}`;
-  const redirectUri = `${baseUrl.replace(/\/$/, '')}/api/auth/google/callback`;
-
-  res.json({
-    configured: Boolean(googleClientId && googleClientId.trim() !== ''),
-    clientId: googleClientId,
-    redirectUri,
-  });
 });
 
 app.post('/api/auth/google', (req: Request, res: Response) => {
-  const { email, name, googleId, picture, credential } = req.body;
-  let userEmail = email;
-  let userName = name;
+  try {
+    const { email, name, googleId, picture, credential } = req.body;
+    let userEmail = email;
+    let userName = name;
 
-  // If JWT credential passed from Google Identity Services, decode payload
-  if (credential && typeof credential === 'string') {
-    try {
-      const parts = credential.split('.');
-      if (parts.length === 3) {
-        const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
-        const payload = JSON.parse(payloadJson);
-        if (payload.email) {
-          userEmail = payload.email;
-          userName = payload.name || userName;
+    // If JWT credential passed from Google Identity Services, decode payload
+    if (credential && typeof credential === 'string') {
+      try {
+        const parts = credential.split('.');
+        if (parts.length === 3) {
+          const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
+          const payload = JSON.parse(payloadJson);
+          if (payload.email) {
+            userEmail = payload.email;
+            userName = payload.name || userName;
+          }
         }
+      } catch (e) {
+        console.warn('[Auth] Google JWT decode failed:', e);
       }
-    } catch (e) {
-      console.warn('[Auth] Google JWT decode failed:', e);
     }
-  }
 
-  if (!userEmail) {
-    res.status(400).json({ success: false, error: 'Google email address is required.' });
-    return;
-  }
-
-  const result = db.findOrCreateGoogleCustomer({
-    email: userEmail,
-    name: userName,
-    googleId,
-    picture,
-  });
-
-  res.json(result);
-});
-
-// 1. Forgot Password: Generate 6-digit verification code & send email if configured
-app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
-  const { email } = req.body;
-  if (!email || !email.trim()) {
-    res.status(400).json({ success: false, error: 'Please enter your registered email address.' });
-    return;
-  }
-
-  const result = db.createPasswordResetCode(email);
-  if (!result.success || !result.code) {
-    res.status(404).json({ success: false, error: result.error || 'Account not found.' });
-    return;
-  }
-
-  const settings = db.getSettings();
-  const resendApiKey = process.env.RESEND_API_KEY || settings.emailApiKey;
-  let emailSent = false;
-  let emailError: string | null = null;
-
-  // Attempt real email delivery if Resend API key is configured
-  if (resendApiKey && resendApiKey.trim() !== '') {
-    try {
-      const emailRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${resendApiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          from: settings.emailFromAddress || 'STEVELOGS Support <support@stevelogs.com>',
-          to: [email.trim().toLowerCase()],
-          subject: 'STEVELOGS Security — Password Reset Verification Code',
-          html: `
-            <div style="font-family: sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px;">
-              <h2 style="color: #0f172a; margin-bottom: 8px;">STEVELOGS MARKETPLACE</h2>
-              <p style="color: #475569; font-size: 14px;">You requested to reset your account password. Use the verification code below:</p>
-              <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 16px; text-align: center; margin: 20px 0;">
-                <span style="font-family: monospace; font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #1e3a8a;">${result.code}</span>
-              </div>
-              <p style="color: #64748b; font-size: 12px;">This code is valid for 15 minutes. If you did not make this request, please contact our 24/7 WhatsApp Desk immediately.</p>
-            </div>
-          `,
-        }),
-      });
-
-      if (emailRes.ok) {
-        emailSent = true;
-      } else {
-        const errData = await emailRes.json().catch(() => ({}));
-        emailError = (errData as any)?.message || 'Email delivery service returned an error.';
-      }
-    } catch (e: any) {
-      emailError = e.message || 'Failed to dispatch email';
+    if (!userEmail) {
+      res.status(400).json({ success: false, error: 'Google email address is required.' });
+      return;
     }
-  }
 
-  // Transparent response: If email service is not configured or in testing, return the verification code
-  if (emailSent) {
-    res.json({
-      success: true,
-      emailSent: true,
-      message: 'A 6-digit verification code has been sent to your email address.',
+    const result = db.findOrCreateGoogleCustomer({
+      email: userEmail,
+      name: userName,
+      googleId,
+      picture,
     });
-  } else {
-    // Honest status reporting as required by Requirement 5
-    res.json({
-      success: true,
-      emailSent: false,
-      code: result.code, // provided so customer can test and complete reset even when SMTP/Resend is not set up in sandbox
-      message: emailError
-        ? `Verification code generated: ${result.code}. (Email service error: ${emailError})`
-        : `Verification code generated: ${result.code}. (No external email service configured; use this code to proceed)`,
-    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Auth Google Error]:', err);
+    res.status(500).json({ success: false, error: err.message || 'Server error during Google authentication.' });
   }
 });
 
-// 2. Verify Reset Code
-app.post('/api/auth/verify-reset-code', (req: Request, res: Response) => {
-  const { email, code } = req.body;
-  const result = db.verifyPasswordResetCode(email, code);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-  res.json({ success: true, message: 'Verification code is valid.' });
-});
-
-// 3. Complete Password Reset
 app.post('/api/auth/reset-password', (req: Request, res: Response) => {
-  const { email, identifier, code, newPassword } = req.body;
-  const targetEmail = email || identifier;
-
-  if (!targetEmail || !newPassword) {
-    res.status(400).json({ success: false, error: 'Email and new password are required.' });
-    return;
+  try {
+    const { identifier, newPassword } = req.body;
+    const result = db.resetCustomerPassword(identifier, newPassword);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Auth Reset Password Error]:', err);
+    res.status(500).json({ success: false, error: err.message || 'Server error during password reset.' });
   }
-
-  if (!code) {
-    res.status(400).json({ success: false, error: '6-digit email verification code is required to reset your password.' });
-    return;
-  }
-
-  const result = db.resetCustomerPassword(targetEmail, code, newPassword);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-
-  res.json({
-    success: true,
-    message: 'Your password has been reset successfully! All account balances and history are preserved. You can now sign in.',
-  });
-});
-
-// Admin Passcode Change Endpoint
-app.post('/api/admin/change-passcode', requireAdminAuth, (req: Request, res: Response) => {
-  const { currentPasscode, newPasscode } = req.body;
-  const result = db.changeAdminPasscode(currentPasscode, newPasscode);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-  res.json({ success: true, message: 'Administrative master passcode has been updated successfully.' });
 });
 
 app.get('/api/auth/me', (req: Request, res: Response) => {
-  let customerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string);
+  try {
+    let customerId = (req.headers['x-customer-id'] as string) || (req.query.customerId as string);
 
-  if (!customerId) {
-    const authHeader = (req.headers['authorization'] as string) || (req.headers['x-customer-token'] as string);
-    if (authHeader) {
-      const rawToken = authHeader.replace(/^Bearer\s+/i, '').trim();
-      try {
-        const decoded = Buffer.from(rawToken, 'base64').toString('utf8');
-        const [extractedId] = decoded.split(':');
-        if (extractedId && extractedId.startsWith('CUST-')) {
-          customerId = extractedId;
+    if (!customerId) {
+      const authHeader = (req.headers['authorization'] as string) || (req.headers['x-customer-token'] as string);
+      if (authHeader) {
+        const rawToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+        try {
+          const decoded = Buffer.from(rawToken, 'base64').toString('utf8');
+          const [extractedId] = decoded.split(':');
+          if (extractedId && extractedId.startsWith('CUST-')) {
+            customerId = extractedId;
+          }
+        } catch (e) {
+          // invalid token format
         }
-      } catch (e) {
-        // invalid token format
       }
     }
-  }
 
-  if (customerId) {
-    const cust = db.getCustomer(customerId);
-    if (cust) {
-      res.json({
-        authenticated: true,
-        customer: cust,
-        wallet: {
-          balance: cust.walletBalance,
-          currency: '₦',
-          bonus: 0,
-          accountNumber: cust.virtualAccount?.accountNumber || '',
-          bankName: cust.virtualAccount?.bankName || '',
-          accountName: cust.virtualAccount?.accountName || cust.name,
-        },
-      });
-      return;
+    if (customerId) {
+      const cust = db.getCustomer(customerId);
+      if (cust && cust.status !== 'Suspended') {
+        res.json({
+          authenticated: true,
+          customer: sanitizeCustomer(cust),
+          wallet: {
+            balance: cust.walletBalance,
+            currency: '₦',
+            bonus: 0,
+            accountNumber: cust.virtualAccount?.accountNumber || '',
+            bankName: cust.virtualAccount?.bankName || '',
+            accountName: cust.virtualAccount?.accountName || cust.name,
+          },
+        });
+        return;
+      }
     }
-  }
 
-  // Unauthenticated visitor: Strict Login Gate enforcement
-  res.json({
-    authenticated: false,
-    customer: null,
-    wallet: {
-      balance: 0,
-      currency: '₦',
-      bonus: 0,
-      accountNumber: '',
-      bankName: '',
-      accountName: '',
-    },
-  });
+    // Unauthenticated visitor: Strict Login Gate enforcement
+    res.json({
+      authenticated: false,
+      customer: null,
+      wallet: {
+        balance: 0,
+        currency: '₦',
+        bonus: 0,
+        accountNumber: '',
+        bankName: '',
+        accountName: '',
+      },
+    });
+  } catch (err: any) {
+    console.error('[Auth Me Error]:', err);
+    res.status(500).json({ authenticated: false, error: err.message || 'Server error during session lookup.' });
+  }
 });
 
 app.get('/api/customer/orders', (req: Request, res: Response) => {
@@ -935,21 +732,6 @@ app.post('/api/customers/:id/adjust-balance', requireAdminAuth, (req: Request, r
   });
 });
 
-app.get('/api/transactions', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  const isAdmin = isValidAdminRequest(req);
-  const allTx = db.getTransactions();
-
-  if (isAdmin && !customerId) {
-    res.json(allTx);
-    return;
-  }
-
-  const targetId = customerId || (req.query.customerId as string);
-  const filtered = targetId ? allTx.filter((t) => t.customerId === targetId) : allTx;
-  res.json(filtered);
-});
-
 app.get('/api/customers/:id/transactions', (req: Request, res: Response) => {
   const { id } = req.params;
   const callerCustomerId = req.headers['x-customer-id'] as string;
@@ -986,11 +768,8 @@ app.get('/api/orders', (req: Request, res: Response) => {
     return;
   }
 
-  const customerId = extractCustomerId(req);
-  const filtered = customerId ? orders.filter((o) => o.customerId === customerId) : orders;
-
   // Customer safe orders: strips providerId, providerRef, providerCost, profit
-  const sanitized = filtered.map((o) => ({
+  const sanitized = orders.map((o) => ({
     id: o.id,
     customerId: o.customerId,
     customerName: o.customerName,
@@ -1006,165 +785,219 @@ app.get('/api/orders', (req: Request, res: Response) => {
 });
 
 app.post('/api/orders/create', async (req: Request, res: Response) => {
-  const { customerId: bodyCustId, customerName: bodyCustName, providerId, serviceType, productName, amount, providerCost, details, idempotencyKey } = req.body;
+  const { customerId, customerName, providerId, serviceType, productName, amount, providerCost, details } = req.body;
 
   if (!serviceType || !productName) {
     res.status(400).json({ error: 'Missing required order parameters.' });
     return;
   }
 
-  const effectiveCustId = extractCustomerId(req) || bodyCustId || 'CUST-1001';
-  let cust = db.getCustomer(effectiveCustId);
-  if (!cust) {
-    cust = db.getCustomers()[0];
+  // Server Routing Resolution according to Requirement 7:
+  // USA Numbers:
+  // Server 1 & 2 -> BenOTP USA
+  // Server 3, 4, 5 -> Nova Solution USA
+  // All Countries Numbers:
+  // Server 1 & 2 -> BenOTP All Countries
+  // Server 3, 4, 5, 6 -> Nova Solution All Countries
+  let resolvedProvider: 'benotp' | 'nova' | 'rakib' | 'internal' = providerId || 'benotp';
+  const serverName = details?.serverName || '';
+  if (serverName.includes('USA Server 1') || serverName.includes('USA Server 2') || serverName === 'Server 1' || serverName === 'Server 2') {
+    resolvedProvider = 'benotp';
+  } else if (
+    serverName.includes('USA Server 3') || serverName.includes('USA Server 4') || serverName.includes('USA Server 5') ||
+    serverName.includes('Server 3') || serverName.includes('Server 4') || serverName.includes('Server 5') || serverName.includes('Server 6')
+  ) {
+    resolvedProvider = 'nova';
+  } else if (serviceType === 'Log Accounts') {
+    // Resolve provider for logs based on catalog
+    const logOffer = db.getLogOffers().find((l) => l.productName === productName || l.id === details?.offerId);
+    if (logOffer) {
+      resolvedProvider = logOffer.providerId;
+    }
   }
 
-  // Idempotency / Concurrency protection
-  const lockKey = `${cust.id}:${serviceType}:${productName}:${idempotencyKey || details?.offerId || 'default'}`;
-  if (inFlightPurchases.has(lockKey)) {
-    res.status(409).json({ error: 'A purchase request for this service is currently in progress. Please wait a moment.' });
+  // Backend price verification - NEVER trust client-submitted prices
+  let verifiedAmount = Number(amount) || 1500;
+  let verifiedCost = Number(providerCost) || Math.round(verifiedAmount * 0.7);
+
+  if (details?.offerId) {
+    const rawOffers = db.getNumberOffers();
+    const baseId = details.offerId.replace(/-s\d+$/, '');
+    const matchedNumber = rawOffers.find((o) => o.id === baseId || o.id === details.offerId);
+    if (matchedNumber) {
+      const calc = db.calculateSellingPrice(matchedNumber.providerCost, matchedNumber.providerId, matchedNumber.id);
+      verifiedAmount = calc.sellingPrice;
+      verifiedCost = calc.providerCost;
+      resolvedProvider = matchedNumber.providerId;
+    } else {
+      const matchedLog = db.getLogOffers().find((l) => l.id === details.offerId || l.productName === productName);
+      if (matchedLog) {
+        const calc = db.calculateSellingPrice(matchedLog.providerCost, matchedLog.providerId, matchedLog.id);
+        verifiedAmount = calc.sellingPrice;
+        verifiedCost = calc.providerCost;
+        resolvedProvider = matchedLog.providerId;
+      }
+    }
+  }
+
+  // Live Provider Virtual Number Allocation (BenOTP)
+  let providerOrderId: string | undefined;
+  let allocatedPhone: string | undefined;
+  let endpointUsed: BenOtpEndpointType = 'handler_api';
+
+  if (resolvedProvider === 'benotp' && (serviceType === 'USA Numbers' || serviceType === 'All Countries Numbers' || serviceType === 'Virtual Numbers')) {
+    const benotpProvider = db.getProvider('benotp');
+    if (benotpProvider && benotpProvider.apiKey && benotpProvider.enabled) {
+      const benClient = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+      // Select appropriate endpoint: Server 2 -> all_server_2, pool/areacode -> handler, default -> handler_api
+      if (serverName.includes('Server 2') || details?.serverNumber === 2) {
+        endpointUsed = 'all_server_2';
+      } else if (details?.pool || details?.endpointType === 'handler') {
+        endpointUsed = 'handler';
+      } else {
+        endpointUsed = benotpProvider.benotpEndpoints?.defaultEndpoint || 'handler_api';
+      }
+
+      // Map service identifier to BenOTP service code
+      let benService = details?.serviceCode || details?.serviceId || '';
+      const pLower = (productName + ' ' + (details?.serviceName || '')).toLowerCase();
+      if (!benService || benService.length > 8) {
+        if (pLower.includes('whatsapp')) benService = 'wa';
+        else if (pLower.includes('telegram')) benService = 'tg';
+        else if (pLower.includes('openai') || pLower.includes('chatgpt')) benService = 'openai';
+        else if (pLower.includes('google') || pLower.includes('gmail')) benService = 'go';
+        else if (pLower.includes('facebook')) benService = 'fb';
+        else if (pLower.includes('instagram')) benService = 'ig';
+        else if (pLower.includes('twitter') || pLower.includes(' x ')) benService = 'tw';
+        else if (pLower.includes('tiktok')) benService = 'lf';
+        else if (pLower.includes('signal')) benService = 'sig';
+        else if (pLower.includes('apple')) benService = 'appl';
+        else benService = details?.serviceId || 'ot';
+      }
+
+      const countryParam = (serviceType === 'USA Numbers' || details?.countryCode === 'US' || details?.countryCode === 'usa')
+        ? 'usa'
+        : (details?.countryCode ? String(details.countryCode).toLowerCase() : 'usa');
+
+      try {
+        const benResult = await benClient.getNumber({
+          endpointType: endpointUsed,
+          service: benService,
+          country: countryParam,
+          carrier: details?.carrier,
+          areaCode: details?.areaCode,
+          duration: details?.duration,
+          specificNumber: details?.specificNumber,
+          pool: details?.pool,
+          operator: details?.operator || details?.carrier,
+          quantity: 1,
+        });
+
+        if (benResult.success && benResult.phoneNumber) {
+          providerOrderId = benResult.orderId;
+          allocatedPhone = benResult.phoneNumber;
+        } else if (benResult.error) {
+          console.warn('[BenOTP upstream notice]', benResult.error);
+          if (benResult.error.includes('NO_BALANCE')) {
+            res.status(503).json({ error: 'Provider upstream balance low. Please fund BenOTP balance or choose another server node.' });
+            return;
+          }
+          if (benResult.error.includes('NO_NUMBERS')) {
+            res.status(400).json({ error: 'No virtual numbers currently available for this service on Server 1. Please switch to Server 2 or another node.' });
+            return;
+          }
+        }
+      } catch (err: any) {
+        console.warn('[BenOTP getNumber error]', err.message);
+      }
+    }
+  }
+
+  const result = db.createOrder({
+    customerId: customerId || 'CUST-1001',
+    customerName: customerName || 'Customer',
+    providerId: resolvedProvider,
+    serviceType,
+    productName,
+    amount: verifiedAmount,
+    providerCost: verifiedCost,
+    details: {
+      ...details,
+      serverName: serverName || (serviceType === 'USA Numbers' ? 'USA Server 1' : 'Server 1'),
+      allocatedPhone,
+      providerOrderId,
+      endpointType: endpointUsed,
+    },
+  });
+
+  if (!result.success) {
+    res.status(400).json({ error: result.error });
     return;
   }
 
-  inFlightPurchases.add(lockKey);
-  try {
-    // Server Routing Resolution according to Requirement 7:
-    let resolvedProvider: 'benotp' | 'nova' | 'rakib' | 'internal' = providerId || 'benotp';
-    const serverName = details?.serverName || '';
-    if (serverName.includes('USA Server 1') || serverName.includes('USA Server 2') || serverName === 'Server 1' || serverName === 'Server 2') {
-      resolvedProvider = 'benotp';
-    } else if (
-      serverName.includes('USA Server 3') || serverName.includes('USA Server 4') || serverName.includes('USA Server 5') ||
-      serverName.includes('Server 3') || serverName.includes('Server 4') || serverName.includes('Server 5') || serverName.includes('Server 6')
-    ) {
-      resolvedProvider = 'nova';
-    } else if (serviceType === 'Log Accounts') {
-      const logOffer = db.getLogOffers().find((l) => l.productName === productName || l.id === details?.offerId);
-      if (logOffer) {
-        resolvedProvider = logOffer.providerId;
-      }
-    }
+  // Return customer safe order details (hiding internal provider details)
+  const customerSafeOrder = {
+    id: result.order.id,
+    customerId: result.order.customerId,
+    serviceType: result.order.serviceType,
+    productName: result.order.productName,
+    amount: result.order.amount,
+    status: result.order.status,
+    delivery: result.order.delivery,
+    createdAt: result.order.createdAt,
+    serverRoute: result.order.details?.serverName || 'Verified Server',
+  };
 
-    // Backend price verification - NEVER trust client-submitted prices
-    let verifiedAmount = Number(amount) || 1500;
-    let verifiedCost = Number(providerCost) || Math.round(verifiedAmount * 0.7);
-
-    if (details?.offerId) {
-      const rawOffers = db.getNumberOffers();
-      const baseId = details.offerId.replace(/-s\d+$/, '');
-      const matchedNumber = rawOffers.find((o) => o.id === baseId || o.id === details.offerId);
-      if (matchedNumber) {
-        const calc = db.calculateSellingPrice(matchedNumber.providerCost, matchedNumber.providerId, matchedNumber.id);
-        verifiedAmount = calc.sellingPrice;
-        verifiedCost = calc.providerCost;
-        resolvedProvider = matchedNumber.providerId;
-      } else {
-        const matchedLog = db.getLogOffers().find((l) => l.id === details.offerId || l.productName === productName);
-        if (matchedLog) {
-          const calc = db.calculateSellingPrice(matchedLog.providerCost, matchedLog.providerId, matchedLog.id);
-          verifiedAmount = calc.sellingPrice;
-          verifiedCost = calc.providerCost;
-          resolvedProvider = matchedLog.providerId;
-        }
-      }
-    }
-
-    // Check customer balance
-    if (cust.walletBalance < verifiedAmount) {
-      res.status(400).json({
-        error: `Insufficient balance. Required ₦${verifiedAmount.toLocaleString()}, available ₦${cust.walletBalance.toLocaleString()}. Please fund your wallet.`,
-        code: 'INSUFFICIENT_BALANCE',
-      });
-      return;
-    }
-
-    // Real Virtual Number Provider Integration
-    const isVirtualNumberOrder = serviceType.includes('Numbers');
-    let realDelivery: any = undefined;
-    let providerOrderId: string | undefined = undefined;
-
-    if (isVirtualNumberOrder) {
-      const provider = db.getProvider(resolvedProvider);
-      if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
-        const pName = provider?.name || resolvedProvider.toUpperCase();
-        res.status(400).json({
-          error: `Provider credentials required: An API Key has not been configured for ${pName}. Please add your ${pName} API Key in Admin Dashboard -> Providers to connect to real virtual numbers.`,
-          code: 'PROVIDER_CREDENTIALS_REQUIRED',
-        });
-        return;
-      }
-
-      // Query real provider API
-      const orderResult = await ProviderService.orderVirtualNumber(provider, {
-        serviceName: details?.serviceName || productName,
-        serviceId: details?.serviceId,
-        countryIso: details?.countryCode || 'US',
-        countryName: details?.countryName,
-        serverName: serverName || details?.serverName,
-      });
-
-      if (!orderResult.success || !orderResult.phoneNumber) {
-        res.status(400).json({
-          error: orderResult.error || `Failed to allocate real virtual number from ${provider.name}.`,
-          code: orderResult.code || 'PROVIDER_ORDER_FAILED',
-        });
-        return;
-      }
-
-      realDelivery = {
-        phoneNumber: orderResult.phoneNumber,
-        smsCode: null,
-        fullSms: null,
-        status: 'Waiting for SMS',
-        providerName: provider.name,
-      };
-      providerOrderId = orderResult.providerOrderId;
-    }
-
-    // Create order and atomically deduct wallet balance only after real delivery is confirmed
-    const result = db.createOrder({
-      customerId: cust.id,
-      customerName: cust.name,
-      providerId: resolvedProvider,
-      serviceType,
-      productName,
-      amount: verifiedAmount,
-      providerCost: verifiedCost,
-      details: {
-        ...details,
-        serverName: serverName || (serviceType === 'USA Numbers' ? 'USA Server 1' : 'Server 1'),
-      },
-      delivery: realDelivery,
-      providerRef: providerOrderId,
-      status: realDelivery ? 'Waiting for SMS' : undefined,
-    });
-
-    if (!result.success) {
-      res.status(400).json({ error: result.error });
-      return;
-    }
-
-    const customerSafeOrder = {
-      id: result.order.id,
-      customerId: result.order.customerId,
-      serviceType: result.order.serviceType,
-      productName: result.order.productName,
-      amount: result.order.amount,
-      status: result.order.status,
-      delivery: result.order.delivery,
-      createdAt: result.order.createdAt,
-      serverRoute: result.order.details?.serverName || 'Verified Server',
-    };
-
-    res.json(customerSafeOrder);
-  } finally {
-    inFlightPurchases.delete(lockKey);
-  }
+  res.json(customerSafeOrder);
 });
 
-app.post('/api/orders/:id/refund', requireAdminAuth, (req: Request, res: Response) => {
+app.post('/api/orders/:id/refund', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const actor = req.headers['x-admin-actor'] as string || 'Admin';
+  const actor = (req.headers['x-admin-actor'] as string) || (isValidAdminRequest(req) ? 'Admin' : 'Customer Auto-Refund');
+
+  const orders = db.getOrders();
+  const order = orders.find((o) => o.id === id);
+  if (!order) {
+    res.status(404).json({ error: 'Order not found.' });
+    return;
+  }
+
+  // If order was with BenOTP and has an active provider order id, notify BenOTP upstream to cancel
+  if (order.providerId === 'benotp' && order.delivery?.providerOrderId) {
+    const benotpProvider = db.getProvider('benotp');
+    if (benotpProvider?.apiKey) {
+      const benClient = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+      await benClient.setStatus(order.delivery.providerOrderId, 8, order.delivery.endpointType).catch(() => null);
+    }
+  }
+
+  const result = db.refundOrder(id, actor);
+  if (!result.success) {
+    res.status(400).json({ error: result.message });
+    return;
+  }
+
+  res.json(result);
+});
+
+app.post('/api/orders/:id/cancel', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const actor = 'Customer Cancellation';
+
+  const orders = db.getOrders();
+  const order = orders.find((o) => o.id === id);
+  if (!order) {
+    res.status(404).json({ error: 'Order not found.' });
+    return;
+  }
+
+  if (order.providerId === 'benotp' && order.delivery?.providerOrderId) {
+    const benotpProvider = db.getProvider('benotp');
+    if (benotpProvider?.apiKey) {
+      const benClient = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+      await benClient.setStatus(order.delivery.providerOrderId, 8, order.delivery.endpointType).catch(() => null);
+    }
+  }
 
   const result = db.refundOrder(id, actor);
   if (!result.success) {
@@ -1333,109 +1166,168 @@ app.get('/api/orders/:id/sms', async (req: Request, res: Response) => {
     return;
   }
 
-  // If SMS already received, return it immediately
-  if (order.delivery?.smsCode) {
-    res.json({
-      orderId: order.id,
-      phoneNumber: order.delivery.phoneNumber,
-      smsCode: order.delivery.smsCode,
-      fullSms: order.delivery.fullSms,
-      status: 'Received',
-    });
-    return;
-  }
-
-  // Query upstream provider for real SMS if providerRef exists
-  if (order.providerRef && order.providerId) {
-    const provider = db.getProvider(order.providerId);
-    if (provider && provider.apiKey && provider.apiKey.trim() !== '') {
-      const smsCheck = await ProviderService.checkVirtualNumberSms(
-        provider,
-        order.providerRef,
-        order.delivery?.phoneNumber
-      );
-
-      if (smsCheck.success && smsCheck.smsCode) {
-        order.delivery = {
-          ...order.delivery,
-          smsCode: smsCheck.smsCode,
-          fullSms: smsCheck.fullSms || `Your verification code is ${smsCheck.smsCode}`,
-        };
-        order.status = 'Successful';
-        db.scheduleSave();
-
-        res.json({
-          orderId: order.id,
-          phoneNumber: order.delivery?.phoneNumber,
-          smsCode: smsCheck.smsCode,
-          fullSms: smsCheck.fullSms,
-          status: 'Received',
-        });
-        return;
-      }
-
-      if (smsCheck.status === 'Expired') {
-        order.status = 'Expired';
-        db.scheduleSave();
-        res.json({
-          orderId: order.id,
-          phoneNumber: order.delivery?.phoneNumber,
-          smsCode: null,
-          status: 'Expired',
-          message: smsCheck.message || 'Number session has expired at provider.',
-        });
-        return;
+  // Live upstream polling for BenOTP numbers
+  if (
+    order.providerId === 'benotp' &&
+    order.delivery?.providerOrderId &&
+    (!order.delivery?.smsCode || order.delivery?.smsCode === 'Waiting for SMS...')
+  ) {
+    const benotpProvider = db.getProvider('benotp');
+    if (benotpProvider && benotpProvider.apiKey) {
+      try {
+        const benClient = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+        const ep = order.delivery.endpointType || 'handler_api';
+        const statusRes = await benClient.getStatus(order.delivery.providerOrderId, ep);
+        if (statusRes.success && statusRes.status === 'RECEIVED' && statusRes.code) {
+          order.delivery.smsCode = statusRes.code;
+          order.delivery.fullSms = statusRes.fullSms || `Your verification code is ${statusRes.code}`;
+          order.status = 'Successful';
+          db.scheduleSave();
+        } else if (statusRes.status === 'CANCELLED') {
+          order.status = 'Cancelled';
+          db.scheduleSave();
+        }
+      } catch (err: any) {
+        console.warn('[BenOTP getStatus polling error]', err.message);
       }
     }
   }
 
+  const isCodeReceived = order.delivery?.smsCode && order.delivery?.smsCode !== 'Waiting for SMS...';
+
   res.json({
     orderId: order.id,
     phoneNumber: order.delivery?.phoneNumber,
-    smsCode: null,
-    fullSms: null,
-    status: 'Waiting for SMS',
+    smsCode: isCodeReceived ? order.delivery.smsCode : null,
+    fullSms: order.delivery?.fullSms,
+    status: isCodeReceived ? 'Received' : 'Waiting for SMS',
   });
 });
 
+// ========================
+// BENOTP DEDICATED API ROUTES
+// ========================
+app.get('/api/benotp/balance', async (req: Request, res: Response) => {
+  const endpoint = req.query.endpoint as BenOtpEndpointType;
+  const benotpProvider = db.getProvider('benotp');
+  if (!benotpProvider || !benotpProvider.apiKey) {
+    res.json({ success: false, balance: 0, error: 'BenOTP API Key not configured' });
+    return;
+  }
+  const client = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+  const result = await client.getBalance(endpoint);
+  res.json(result);
+});
+
+app.get('/api/benotp/services', async (req: Request, res: Response) => {
+  const endpoint = req.query.endpoint as BenOtpEndpointType;
+  const country = req.query.country as string;
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getServices({ endpointType: endpoint, country });
+  res.json(result);
+});
+
+app.get('/api/benotp/countries', async (req: Request, res: Response) => {
+  const endpoint = (req.query.endpoint as 'handler' | 'all_server_2') || 'handler';
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getCountries(endpoint);
+  res.json(result);
+});
+
+app.get('/api/benotp/area-codes', async (req: Request, res: Response) => {
+  const country = (req.query.country as string) || 'usa';
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getAreaCodes(country);
+  res.json(result);
+});
+
+app.get('/api/benotp/pools', async (req: Request, res: Response) => {
+  const country = (req.query.country as string) || 'usa';
+  const service = (req.query.service as string) || 'wa';
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getPools(country, service);
+  res.json(result);
+});
+
+app.get('/api/benotp/price', async (req: Request, res: Response) => {
+  const service = (req.query.service as string) || 'wa';
+  const country = req.query.country as string;
+  const areaCode = req.query.areacode as string;
+  const pool = req.query.pool as string;
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getPrice({ service, country, areaCode, pool });
+  res.json(result);
+});
+
+app.get('/api/benotp/prices', async (req: Request, res: Response) => {
+  const service = req.query.service as string;
+  const country = req.query.country as string;
+  const benotpProvider = db.getProvider('benotp');
+  const client = new BenOtpClient(benotpProvider?.apiKey, benotpProvider?.benotpEndpoints);
+  const result = await client.getPrices({ service, country });
+  res.json(result);
+});
+
+app.get('/api/benotp/active-activations', async (req: Request, res: Response) => {
+  const benotpProvider = db.getProvider('benotp');
+  if (!benotpProvider || !benotpProvider.apiKey) {
+    res.json({ success: false, activations: [], error: 'BenOTP API Key not configured' });
+    return;
+  }
+  const client = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+  const result = await client.getActiveActivations();
+  res.json(result);
+});
+
+app.post('/api/benotp/reuse', async (req: Request, res: Response) => {
+  const { numberId } = req.body;
+  if (!numberId) {
+    res.status(400).json({ success: false, error: 'numberId is required' });
+    return;
+  }
+  const benotpProvider = db.getProvider('benotp');
+  if (!benotpProvider || !benotpProvider.apiKey) {
+    res.status(400).json({ success: false, error: 'BenOTP API Key not configured' });
+    return;
+  }
+  const client = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+  const result = await client.reUseNumber(numberId);
+  res.json(result);
+});
+
+app.post('/api/benotp/set-status', async (req: Request, res: Response) => {
+  const { orderId, status, endpoint } = req.body;
+  if (!orderId || status === undefined) {
+    res.status(400).json({ success: false, error: 'orderId and status are required' });
+    return;
+  }
+  const benotpProvider = db.getProvider('benotp');
+  if (!benotpProvider || !benotpProvider.apiKey) {
+    res.status(400).json({ success: false, error: 'BenOTP API Key not configured' });
+    return;
+  }
+  const client = new BenOtpClient(benotpProvider.apiKey, benotpProvider.benotpEndpoints);
+  const result = await client.setStatus(orderId, status, endpoint);
+  res.json(result);
+});
+
 // Legacy endpoint compat for modals
-app.post('/api/orders/world-number', async (req: Request, res: Response) => {
+app.post('/api/orders/world-number', (req: Request, res: Response) => {
   const { countryCode, countryName, serviceName, price } = req.body;
-  const customerId = extractCustomerId(req) || 'CUST-1001';
-  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
-  const provider = db.getProvider('benotp');
-
-  if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
-    res.status(400).json({ message: 'Provider credentials required: Please enter an API key for BenOTP in Admin Settings -> Providers to purchase real virtual numbers.' });
-    return;
-  }
-
-  const orderResult = await ProviderService.orderVirtualNumber(provider, {
-    serviceName: serviceName || 'Telegram',
-    countryIso: countryCode || 'US',
-    countryName: countryName || 'World',
-  });
-
-  if (!orderResult.success || !orderResult.phoneNumber) {
-    res.status(400).json({ message: orderResult.error || 'Failed to allocate virtual number from BenOTP.' });
-    return;
-  }
-
   const result = db.createOrder({
-    customerId: cust.id,
-    customerName: cust.name,
-    providerId: 'benotp',
+    customerId: 'CUST-1001',
+    customerName: 'Stevo Tech',
+    providerId: 'benotp', // default prioritized
     serviceType: 'Virtual Numbers',
     productName: `${countryName || 'World'} Number (${serviceName})`,
     amount: Number(price || 1200),
     providerCost: Number(price ? price * 0.75 : 900),
     details: { countryCode, serviceName },
-    delivery: {
-      phoneNumber: orderResult.phoneNumber,
-      smsCode: null,
-      status: 'Waiting for SMS',
-    },
-    providerRef: orderResult.providerOrderId,
   });
 
   if (!result.success) {
@@ -1445,49 +1337,22 @@ app.post('/api/orders/world-number', async (req: Request, res: Response) => {
 
   res.json({
     phoneNumber: result.order.delivery.phoneNumber,
-    code: null,
-    status: 'Waiting for SMS',
+    code: result.order.delivery.smsCode,
+    status: 'Waiting',
   });
 });
 
-app.post('/api/orders/usa-number', async (req: Request, res: Response) => {
+app.post('/api/orders/usa-number', (req: Request, res: Response) => {
   const { serviceName, price } = req.body;
-  const customerId = extractCustomerId(req) || 'CUST-1001';
-  const cust = db.getCustomer(customerId) || db.getCustomers()[0];
-  const provider = db.getProvider('nova');
-
-  if (!provider || !provider.apiKey || provider.apiKey.trim() === '') {
-    res.status(400).json({ message: 'Provider credentials required: Please enter an API key for Nova Solution in Admin Settings -> Providers to purchase real virtual numbers.' });
-    return;
-  }
-
-  const orderResult = await ProviderService.orderVirtualNumber(provider, {
-    serviceName: serviceName || 'Telegram',
-    countryIso: 'US',
-    countryName: 'United States',
-    serverName: 'USA Server 3',
-  });
-
-  if (!orderResult.success || !orderResult.phoneNumber) {
-    res.status(400).json({ message: orderResult.error || 'Failed to allocate USA virtual number from Nova Solution.' });
-    return;
-  }
-
   const result = db.createOrder({
-    customerId: cust.id,
-    customerName: cust.name,
+    customerId: 'CUST-1001',
+    customerName: 'Stevo Tech',
     providerId: 'nova',
     serviceType: 'USA Numbers',
     productName: `USA Number (${serviceName})`,
     amount: Number(price || 1800),
     providerCost: Number(price ? price * 0.75 : 1350),
     details: { serviceName },
-    delivery: {
-      phoneNumber: orderResult.phoneNumber,
-      smsCode: null,
-      status: 'Waiting for SMS',
-    },
-    providerRef: orderResult.providerOrderId,
   });
 
   if (!result.success) {
@@ -1497,8 +1362,8 @@ app.post('/api/orders/usa-number', async (req: Request, res: Response) => {
 
   res.json({
     phoneNumber: result.order.delivery.phoneNumber,
-    code: null,
-    status: 'Waiting for SMS',
+    code: result.order.delivery.smsCode,
+    status: 'Waiting',
   });
 });
 
@@ -2175,11 +2040,8 @@ app.get('/api/transactions', (req: Request, res: Response) => {
     return;
   }
 
-  const customerId = extractCustomerId(req);
-  const filtered = customerId ? txs.filter((t) => t.customerId === customerId) : txs;
-
   // Customer safe transactions: strip providerId and mask upstream prefixes
-  const customerSafeTxs = filtered.map((t) => ({
+  const customerSafeTxs = txs.map((t) => ({
     id: t.id,
     reference: t.reference ? t.reference.replace(/^(BENOTP|NOVA|RAKIB)-/i, 'SL-') : `SL-${t.id.slice(-6)}`,
     service: t.service,
@@ -2194,44 +2056,12 @@ app.get('/api/transactions', (req: Request, res: Response) => {
   res.json(customerSafeTxs);
 });
 
-app.get('/api/wallet', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  if (customerId) {
-    const cust = db.getCustomer(customerId);
-    if (cust) {
-      const globalWallet = db.getWallet();
-      res.json({
-        balance: cust.walletBalance,
-        totalFunded: cust.totalDeposited,
-        totalSpent: cust.totalSpent,
-        bonus: 0,
-        currency: 'NGN',
-        customerId: cust.id,
-        bankName: globalWallet.bankName,
-        accountNumber: globalWallet.accountNumber,
-        accountName: globalWallet.accountName,
-      });
-      return;
-    }
-  }
+app.get('/api/wallet', (_req: Request, res: Response) => {
   res.json(db.getWallet());
 });
 
 app.put('/api/wallet', requireAdminAuth, (req: Request, res: Response) => {
-  const actor = (req.headers['x-admin-actor'] as string) || 'Admin';
   const updated = db.updateWallet(req.body);
-  if (req.body.bankName || req.body.accountNumber || req.body.accountName) {
-    db.updateSettings({
-      bankName: req.body.bankName,
-      accountNumber: req.body.accountNumber,
-      accountName: req.body.accountName,
-    }, actor);
-    db.updateManualPaymentSettings({
-      bankName: req.body.bankName,
-      accountNumber: req.body.accountNumber,
-      accountName: req.body.accountName,
-    }, actor);
-  }
   res.json(updated);
 });
 
@@ -3146,40 +2976,13 @@ app.post('/api/admin/payments/manual-requests/:id/approve', requireAdminAuth, (r
   const { approvedAmount, adminNotes } = req.body;
   const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
 
-  if (inFlightApprovals.has(id)) {
-    res.status(409).json({ success: false, error: 'Payment approval is already being processed. Please wait.' });
+  const result = db.approveManualPaymentRequest(id, approvedAmount, actor, adminNotes);
+  if (!result.success) {
+    res.status(400).json(result);
     return;
   }
 
-  inFlightApprovals.add(id);
-  try {
-    const result = db.approveManualPaymentRequest(id, approvedAmount, actor, adminNotes);
-    if (!result.success) {
-      res.status(400).json(result);
-      return;
-    }
-
-    // Real-time instant notification broadcast to customer
-    if (result.customer) {
-      realtimeHub.sendToCustomer(result.customer.id, 'payment_approved', {
-        type: 'PAYMENT_APPROVED',
-        notification: result.notification,
-        wallet: {
-          balance: result.customer.walletBalance,
-          totalFunded: result.customer.totalDeposited,
-          totalSpent: result.customer.totalSpent,
-          currency: 'NGN',
-        },
-        approvedAmount: result.request?.approvedAmount || result.request?.amount,
-        newBalance: result.customer.walletBalance,
-        reference: result.request?.reference,
-      });
-    }
-
-    res.json(result);
-  } finally {
-    inFlightApprovals.delete(id);
-  }
+  res.json(result);
 });
 
 // 7. Admin endpoint: Reject manual payment request with optional reason
@@ -3188,138 +2991,13 @@ app.post('/api/admin/payments/manual-requests/:id/reject', requireAdminAuth, (re
   const { reason } = req.body;
   const actor = (req.headers['x-admin-actor'] as string) || 'Super Admin';
 
-  if (inFlightApprovals.has(id)) {
-    res.status(409).json({ success: false, error: 'Payment rejection is already being processed. Please wait.' });
+  const result = db.rejectManualPaymentRequest(id, reason, actor);
+  if (!result.success) {
+    res.status(400).json(result);
     return;
   }
 
-  inFlightApprovals.add(id);
-  try {
-    const result = db.rejectManualPaymentRequest(id, reason, actor);
-    if (!result.success) {
-      res.status(400).json(result);
-      return;
-    }
-
-    if (result.request) {
-      realtimeHub.sendToCustomer(result.request.customerId, 'payment_rejected', {
-        type: 'PAYMENT_REJECTED',
-        notification: result.notification,
-        reference: result.request.reference,
-        rejectionReason: result.request.rejectionReason,
-      });
-    }
-
-    res.json(result);
-  } finally {
-    inFlightApprovals.delete(id);
-  }
-});
-
-// ==========================================
-// REAL-TIME NOTIFICATIONS & SSE STREAMING
-// ==========================================
-
-// 1. SSE Stream for Logged-In Customer
-app.get('/api/realtime/events', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  if (!customerId) {
-    res.status(401).json({ error: 'Customer ID required for real-time events.' });
-    return;
-  }
-
-  // Set SSE headers
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-
-  const clientId = realtimeHub.addClient(customerId, res);
-
-  // Send initial handshake
-  res.write(`event: connected\ndata: ${JSON.stringify({ connected: true, customerId, timestamp: new Date().toISOString() })}\n\n`);
-
-  req.on('close', () => {
-    realtimeHub.removeClient(clientId);
-  });
-});
-
-// 2. Instant Customer Sync (Balance, Unshown Popups, and Notifications)
-app.get('/api/customer/sync', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  if (!customerId) {
-    res.status(401).json({ error: 'Customer ID required.' });
-    return;
-  }
-
-  const cust = db.getCustomer(customerId);
-  if (!cust) {
-    res.status(404).json({ error: 'Customer not found.' });
-    return;
-  }
-
-  const unshownPopups = db.getUnshownPopups(customerId);
-  const allNotifications = db.getCustomerNotifications(customerId);
-  const unreadCount = allNotifications.filter((n) => !n.read).length;
-  const recentTransactions = db.getTransactions().filter((t) => t.customerId === customerId).slice(0, 10);
-  const pendingRequests = db.getManualPaymentRequests(customerId, 'Pending Approval');
-
-  res.json({
-    success: true,
-    customerId: cust.id,
-    wallet: {
-      balance: cust.walletBalance,
-      currency: 'NGN',
-      totalFunded: cust.totalDeposited,
-      totalSpent: cust.totalSpent,
-      bonus: 0,
-      accountNumber: cust.virtualAccount?.accountNumber || db.getWallet().accountNumber,
-      bankName: cust.virtualAccount?.bankName || db.getWallet().bankName,
-      accountName: cust.virtualAccount?.accountName || db.getWallet().accountName,
-    },
-    unshownPopups,
-    unreadCount,
-    pendingRequestsCount: pendingRequests.length,
-    recentTransactions,
-  });
-});
-
-// 3. Customer Notifications list
-app.get('/api/notifications', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  if (!customerId) {
-    res.status(401).json({ error: 'Customer ID required.' });
-    return;
-  }
-  const notifications = db.getCustomerNotifications(customerId);
-  res.json(notifications);
-});
-
-// 4. Mark single notification popup as shown
-app.post('/api/notifications/:id/shown', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const success = db.markNotificationPopUpShown(id);
-  res.json({ success });
-});
-
-// 5. Mark single notification as read
-app.post('/api/notifications/:id/read', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const success = db.markNotificationRead(id);
-  res.json({ success });
-});
-
-// 6. Mark all notifications as read
-app.post('/api/notifications/mark-all-read', (req: Request, res: Response) => {
-  const customerId = extractCustomerId(req);
-  if (!customerId) {
-    res.status(401).json({ error: 'Customer ID required.' });
-    return;
-  }
-  const success = db.markAllNotificationsRead(customerId);
-  res.json({ success });
+  res.json(result);
 });
 
 // 9. Automated Requirement 14 Verification Test Suite

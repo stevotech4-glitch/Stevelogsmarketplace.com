@@ -1,6 +1,7 @@
 import { ProviderConfig, VirtualNumberOffer, LogOffer, ProviderSyncReport, MarketplaceCategory, MarketplaceProduct } from '../types';
 import { generateMasterNumberOffers, generateMasterLogOffers, MASTER_SERVICES, MASTER_COUNTRIES } from './catalogData';
 import { RakibSocialsClient } from './rakibClient';
+import { BenOtpClient } from './benotpClient';
 
 export interface ProviderConnectionResult {
   success: boolean;
@@ -48,15 +49,43 @@ export class ProviderService {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Stevelogs-Marketplace/2.0',
       };
 
+      if (provider.id === 'benotp') {
+        const client = new BenOtpClient(provider.apiKey, provider.benotpEndpoints);
+        const balRes = await client.getBalance(provider.benotpEndpoints?.defaultEndpoint || 'handler_api');
+        const latencyMs = Date.now() - startTime;
+        if (balRes.success) {
+          const balNgn = Math.round(balRes.balance * 1550);
+          return {
+            success: true,
+            status: 'active',
+            latencyMs,
+            balance: balNgn,
+            message: `Connected successfully to BenOTP (${balRes.endpointUsed}) in ${latencyMs}ms. Upstream server healthy. Verified balance: $${balRes.balance.toFixed(2)} (~₦${balNgn.toLocaleString()}).`,
+            timestamp,
+          };
+        } else if (balRes.raw === 'BAD_KEY' || balRes.raw === 'ERROR_KEY') {
+          return {
+            success: false,
+            status: 'credentials_required',
+            latencyMs,
+            message: `Authentication failed (BAD_KEY). Please verify BenOTP API Key in Provider settings.`,
+            timestamp,
+          };
+        } else {
+          return {
+            success: false,
+            status: 'error',
+            latencyMs,
+            message: `BenOTP error: ${balRes.error || 'Connection failed'}`,
+            timestamp,
+          };
+        }
+      }
+
       if (provider.id === 'nova') {
         // Nova Solution endpoint format
         testUrl = `${provider.baseUrl.replace(/\/$/, '')}/balance`;
         headers['Authorization'] = `Bearer ${provider.apiKey}`;
-      } else if (provider.id === 'benotp') {
-        // BenOTP endpoint format
-        testUrl = `${provider.baseUrl.replace(/\/$/, '')}`;
-        headers['Authorization'] = `Bearer ${provider.apiKey}`;
-        headers['X-API-KEY'] = provider.apiKey;
       } else if (provider.id === 'rakib') {
         // Rakib Socials API: GET /balance with Authorization: Bearer <API_KEY>
         const key = (provider.apiKey || process.env.RAKIB_API_KEY || 'keyikh8x4hyb1').trim();
@@ -270,33 +299,54 @@ export class ProviderService {
       let pagesProcessed = 1;
       let failedRequests = 0;
 
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch('https://benotp.com/services', {
-          headers: {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'User-Agent': 'Mozilla/5.0 Stevelogs/2.0',
-          },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
+      const benClient = new BenOtpClient(provider.apiKey, provider.benotpEndpoints);
 
-        if (res.ok) {
-          const html = await res.text();
-          const regex = /<tr>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<\/tr>/g;
-          let match;
-          while ((match = regex.exec(html)) !== null) {
-            const name = match[1].trim();
-            const rawPrice = match[2].replace(/[^\d.]/g, '');
-            const price = parseFloat(rawPrice) || 250;
-            benOtpServices.push({ name, price });
+      if (provider.apiKey) {
+        try {
+          const ep = provider.benotpEndpoints?.defaultEndpoint || 'handler_api';
+          const srvRes = await benClient.getServices({ endpointType: ep });
+          if (srvRes.success && srvRes.services.length > 0) {
+            benOtpServices = srvRes.services.map((s) => ({
+              name: s.name,
+              price: s.price ? Math.round(s.price * 1550) : 550,
+            }));
+            pagesProcessed = 1;
+          } else {
+            failedRequests++;
           }
-        } else {
+        } catch {
           failedRequests++;
         }
-      } catch (err: any) {
-        console.warn('BenOTP live services fetch fallback to master catalog:', err.message);
+      }
+
+      // If API key is not entered or returned no services, try public list / fallback
+      if (benOtpServices.length === 0) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 6000);
+          const res = await fetch('https://benotp.com/services', {
+            headers: {
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'User-Agent': 'Mozilla/5.0 Stevelogs/2.0',
+            },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (res.ok) {
+            const html = await res.text();
+            const regex = /<tr>\s*<td>(.*?)<\/td>\s*<td>(.*?)<\/td>\s*<\/tr>/g;
+            let match;
+            while ((match = regex.exec(html)) !== null) {
+              const name = match[1].trim();
+              const rawPrice = match[2].replace(/[^\d.]/g, '');
+              const price = parseFloat(rawPrice) || 250;
+              benOtpServices.push({ name, price });
+            }
+          }
+        } catch (err: any) {
+          console.warn('BenOTP live services fetch fallback to master catalog:', err.message);
+        }
       }
 
       // If upstream failed or returned empty, use all MASTER_SERVICES as safe fallback
@@ -671,247 +721,5 @@ export class ProviderService {
       providerRef,
       deliveryMessage,
     };
-  }
-
-  /**
-   * Request real virtual number purchase from configured upstream provider API.
-   * Never fabricates numbers. If credentials or upstream balance are missing, returns an explicit error.
-   */
-  static async orderVirtualNumber(
-    provider: ProviderConfig,
-    params: {
-      serviceName: string;
-      serviceId?: string;
-      countryIso?: string;
-      countryName?: string;
-      serverName?: string;
-    }
-  ): Promise<{
-    success: boolean;
-    phoneNumber?: string;
-    providerOrderId?: string;
-    error?: string;
-    code?: 'CREDENTIALS_REQUIRED' | 'PROVIDER_ERROR' | 'OUT_OF_STOCK';
-    rawResponse?: any;
-  }> {
-    if (!provider.apiKey || provider.apiKey.trim() === '') {
-      return {
-        success: false,
-        error: `Provider credentials required: No API Key configured for ${provider.name}. Please enter your ${provider.name} API Key in Admin Dashboard -> Providers to enable live number provisioning.`,
-        code: 'CREDENTIALS_REQUIRED',
-      };
-    }
-
-    if (!provider.baseUrl || provider.baseUrl.trim() === '') {
-      return {
-        success: false,
-        error: `Provider Base URL is missing for ${provider.name}.`,
-        code: 'PROVIDER_ERROR',
-      };
-    }
-
-    const cleanBaseUrl = provider.baseUrl.replace(/\/$/, '');
-    const cleanApiKey = provider.apiKey.trim();
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-      let targetUrl = `${cleanBaseUrl}/orders/create`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Stevelogs-Virtual-Numbers/2.0',
-      };
-
-      let bodyData: any = {
-        service: params.serviceId || params.serviceName,
-        country: params.countryIso || 'US',
-        server: params.serverName || 'Server 1',
-      };
-
-      if (provider.id === 'nova') {
-        targetUrl = `${cleanBaseUrl}/numbers/buy`;
-        headers['Authorization'] = `Bearer ${cleanApiKey}`;
-        bodyData = {
-          service: params.serviceId || params.serviceName,
-          country: params.countryIso || 'US',
-          scope: params.serverName?.toLowerCase().includes('usa') ? 'usa' : 'global',
-        };
-      } else if (provider.id === 'benotp') {
-        targetUrl = `${cleanBaseUrl}/orders/buy-number`;
-        headers['Authorization'] = `Bearer ${cleanApiKey}`;
-        headers['X-API-KEY'] = cleanApiKey;
-        bodyData = {
-          service: params.serviceId || params.serviceName,
-          country: params.countryIso || 'US',
-          server: params.serverName || 'Server 1',
-        };
-      }
-
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(bodyData),
-        signal: controller.signal,
-      }).catch((err) => {
-        if (err.name === 'AbortError') {
-          throw new Error(`Upstream request to ${provider.name} timed out after 12s.`);
-        }
-        throw err;
-      });
-
-      clearTimeout(timeoutId);
-
-      let data: any = {};
-      try {
-        data = await response.json();
-      } catch {
-        const text = await response.text().catch(() => '');
-        return {
-          success: false,
-          error: `Upstream ${provider.name} returned non-JSON response (HTTP ${response.status}): ${text.slice(0, 120)}`,
-          code: 'PROVIDER_ERROR',
-        };
-      }
-
-      if (!response.ok) {
-        const errMsg = data.message || data.error || data.detail || `HTTP ${response.status} from ${provider.name}`;
-        return {
-          success: false,
-          error: `${provider.name} rejected purchase: ${errMsg}`,
-          code: response.status === 401 || response.status === 403 ? 'CREDENTIALS_REQUIRED' : 'PROVIDER_ERROR',
-          rawResponse: data,
-        };
-      }
-
-      // Extract real phone number and order ID
-      const realPhone = data.phone || data.number || data.phoneNumber || data.data?.phone || data.data?.number;
-      const realOrderId = data.order_id || data.id || data.orderId || data.data?.order_id || data.data?.id;
-
-      if (!realPhone) {
-        return {
-          success: false,
-          error: data.message || data.error || `No number available from ${provider.name} for this service/country at the moment.`,
-          code: 'OUT_OF_STOCK',
-          rawResponse: data,
-        };
-      }
-
-      return {
-        success: true,
-        phoneNumber: String(realPhone).startsWith('+') ? String(realPhone) : `+${realPhone}`,
-        providerOrderId: realOrderId ? String(realOrderId) : undefined,
-        rawResponse: data,
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        error: `Could not connect to ${provider.name}: ${err.message || 'Network unreachable'}`,
-        code: 'PROVIDER_ERROR',
-      };
-    }
-  }
-
-  /**
-   * Check real SMS verification code from provider API.
-   * Never fabricates codes. Returns actual code if received or 'Waiting for SMS'.
-   */
-  static async checkVirtualNumberSms(
-    provider: ProviderConfig,
-    providerOrderId: string,
-    phoneNumber?: string
-  ): Promise<{
-    success: boolean;
-    status: 'Received' | 'Waiting for SMS' | 'Expired' | 'Error';
-    smsCode?: string;
-    fullSms?: string;
-    message?: string;
-    rawResponse?: any;
-  }> {
-    if (!provider.apiKey || provider.apiKey.trim() === '') {
-      return {
-        success: false,
-        status: 'Error',
-        message: `Provider API Key is not configured for ${provider.name}.`,
-      };
-    }
-
-    const cleanBaseUrl = provider.baseUrl.replace(/\/$/, '');
-    const cleanApiKey = provider.apiKey.trim();
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-      let targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/status`;
-      const headers: Record<string, string> = {
-        'Accept': 'application/json',
-        'User-Agent': 'Stevelogs-Virtual-Numbers/2.0',
-      };
-
-      if (provider.id === 'nova') {
-        targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/sms`;
-        headers['Authorization'] = `Bearer ${cleanApiKey}`;
-      } else if (provider.id === 'benotp') {
-        targetUrl = `${cleanBaseUrl}/orders/${encodeURIComponent(providerOrderId)}/status`;
-        headers['Authorization'] = `Bearer ${cleanApiKey}`;
-        headers['X-API-KEY'] = cleanApiKey;
-      }
-
-      const response = await fetch(targetUrl, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      }).catch((err) => {
-        if (err.name === 'AbortError') throw new Error('SMS check timed out');
-        throw err;
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        return {
-          success: false,
-          status: 'Error',
-          message: `Upstream ${provider.name} responded with HTTP ${response.status}`,
-        };
-      }
-
-      const data = await response.json().catch(() => ({}));
-      const code = data.sms_code || data.code || data.sms || data.data?.sms_code || data.data?.code;
-      const fullMessage = data.full_sms || data.message || data.text || data.data?.message || (code ? `Your verification code is ${code}` : undefined);
-
-      if (code) {
-        return {
-          success: true,
-          status: 'Received',
-          smsCode: String(code).trim(),
-          fullSms: fullMessage,
-          rawResponse: data,
-        };
-      }
-
-      if (data.status === 'expired' || data.status === 'cancelled') {
-        return {
-          success: true,
-          status: 'Expired',
-          message: 'Number has expired or was cancelled by provider.',
-          rawResponse: data,
-        };
-      }
-
-      return {
-        success: true,
-        status: 'Waiting for SMS',
-        rawResponse: data,
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        status: 'Error',
-        message: err.message || 'Failed to check SMS from provider',
-      };
-    }
   }
 }

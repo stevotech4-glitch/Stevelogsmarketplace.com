@@ -43,20 +43,14 @@
     "flutterwaveMode": "test",
     "flutterwavePublicKey": "",
     "flutterwaveSecretKey": "",
-    "flutterwaveSecretHash": "",
-    "googleClientId": "",
-    "googleClientSecret": "",
-    "emailServiceEnabled": false,
-    "emailProvider": "none",
-    "emailApiKey": "",
-    "emailFromAddress": "support@stevelogs.com"
+    "flutterwaveSecretHash": ""
   },
   "providers": [
     {
       "id": "benotp",
       "name": "BenOTP",
       "website": "https://benotp.com/buy-number",
-      "baseUrl": "https://api.benotp.com/v1",
+      "baseUrl": "https://benotp.com/stubs/handler_api.php",
       "docsUrl": "https://benotp.com/api-docs",
       "apiKey": "",
       "enabled": true,
@@ -79,6 +73,12 @@
         "unmappedProductsCount": 0,
         "unmappedProducts": [],
         "statusMessage": "Synchronized 1018 virtual numbers across 52 countries from BenOTP. 100% mapped to USA Servers 1-2 & All Countries Servers 1-2."
+      },
+      "benotpEndpoints": {
+        "handlerApiUrl": "https://benotp.com/stubs/handler_api.php",
+        "handlerUrl": "https://benotp.com/stubs/handler.php",
+        "allServer2Url": "https://benotp.com/stubs/all_server_2.php",
+        "defaultEndpoint": "handler_api"
       }
     },
     {
@@ -56630,78 +56630,16 @@
       "status": "Active",
       "tier": "VIP Reseller",
       "joinedAt": "2026-01-15T10:00:00Z",
-      "lastActive": "2026-10-24T09:27:38.056Z",
+      "lastActive": "2026-10-22T07:39:47.861Z",
       "referralCode": "SL-1001",
       "referralLink": "https://stevelogsmarketplace.com/?ref=SL-1001",
       "totalReferrals": 0,
       "qualifiedReferrals": 0,
       "referralEarnings": 0,
       "referralBalance": 0
-    },
-    {
-      "id": "CUST-005769",
-      "name": "Adebayo Tester",
-      "email": "adebayo_test_1@example.com",
-      "phone": "+2348000000000",
-      "username": "adebayo_test_1",
-      "passwordHash": "b277df207a0676b741a452f593bd2762ea04ee4e3a4db6055f44a0a5e7ed843e",
-      "salt": "5ff8407605ba85f176f2cfd10740da25",
-      "walletBalance": 0,
-      "totalDeposited": 0,
-      "totalSpent": 0,
-      "ordersCount": 0,
-      "successfulOrders": 0,
-      "failedOrders": 0,
-      "status": "Active",
-      "tier": "Standard",
-      "joinedAt": "2026-10-24T08:36:45.769Z",
-      "lastActive": "2026-10-24T08:36:49.760Z",
-      "referralCode": "SL-0057693C51",
-      "referralLink": "https://stevelogsmarketplace.com/?ref=SL-0057693C51",
-      "totalReferrals": 0,
-      "qualifiedReferrals": 0,
-      "referralEarnings": 0,
-      "referralBalance": 0
-    },
-    {
-      "id": "CUST-368948",
-      "name": "Chinedu Eze",
-      "email": "chinedu@example.com",
-      "phone": "+2348000000000",
-      "username": "chinedu",
-      "passwordHash": "fb180e25491e06280100c6b1f74812de322895ab233be9c0a06c841abb2e2f38",
-      "salt": "73aa236f02cc66e35ec6c8ca32304fca",
-      "walletBalance": 5000,
-      "totalDeposited": 0,
-      "totalSpent": 0,
-      "ordersCount": 0,
-      "successfulOrders": 0,
-      "failedOrders": 0,
-      "status": "Active",
-      "tier": "Standard",
-      "joinedAt": "2026-10-24T08:42:48.948Z",
-      "lastActive": "2026-10-24T08:42:52.989Z",
-      "referralCode": "SL-3689487B1B",
-      "referralLink": "https://stevelogsmarketplace.com/?ref=SL-3689487B1B",
-      "totalReferrals": 0,
-      "qualifiedReferrals": 0,
-      "referralEarnings": 0,
-      "referralBalance": 0
     }
   ],
-  "transactions": [
-    {
-      "id": "tx-1792834047024",
-      "reference": "SL-MAN-71849",
-      "service": "Manual Wallet Adjustment",
-      "description": "Debit: Test cleanup",
-      "amount": 5000,
-      "type": "debit",
-      "status": "Successful",
-      "date": "09:27 AM",
-      "customerId": "CUST-1001"
-    }
-  ],
+  "transactions": [],
   "orders": [],
   "telegramPricing": {
     "providerId": "nova",
@@ -56778,92 +56716,22 @@
   "telegramOrders": [],
   "auditLogs": [
     {
-      "id": "aud-1792834058056-193",
-      "timestamp": "2026-10-24T09:27:38.056Z",
-      "actor": "Super Administrator",
-      "action": "Manual Payment Approved & Credited",
-      "category": "WALLET",
-      "details": "Approved manual deposit [Ref: MAN-DEP-057448-3506] for Stevo Tech (Admin/Owner). Credited ₦2,500 (Prev: ₦0 -> New: ₦2,500)",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792834057448-598",
-      "timestamp": "2026-10-24T09:27:37.448Z",
-      "actor": "Stevo Tech (Admin/Owner)",
-      "action": "Manual Payment Request Submitted",
-      "category": "WALLET",
-      "details": "Stevo Tech (Admin/Owner) (CUST-1001) submitted manual transfer of ₦2,500 [Ref: MAN-DEP-057448-3506]",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792834057435-275",
-      "timestamp": "2026-10-24T09:27:37.435Z",
-      "actor": "Super Administrator",
-      "action": "Admin Panel Authenticated",
+      "id": "aud-1792917793848-862",
+      "timestamp": "2026-10-25T08:43:13.848Z",
+      "actor": "David Adeleke",
+      "action": "Customer Password Reset",
       "category": "AUTH",
-      "details": "Successful administrator authentication session created from 127.0.0.1.",
+      "details": "Password reset successfully for David Adeleke (customer_test_1792917793697@example.com)",
       "ip": "127.0.0.1",
       "status": "Success"
     },
     {
-      "id": "aud-1792834047030-942",
-      "timestamp": "2026-10-24T09:27:27.030Z",
-      "actor": "Super Administrator",
-      "action": "Customer Balance Debited",
-      "category": "WALLET",
-      "details": "Stevo Tech (Admin/Owner) (CUST-1001): ₦5,000 - Reason: Test cleanup [Prev: ₦5,000 -> New: ₦0]",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792834046997-552",
-      "timestamp": "2026-10-24T09:27:26.997Z",
-      "actor": "Super Administrator",
-      "action": "Manual Payment Approved & Credited",
-      "category": "WALLET",
-      "details": "Approved manual deposit [Ref: MAN-DEP-046955-6280] for Stevo Tech (Admin/Owner). Credited ₦5,000 (Prev: ₦0 -> New: ₦5,000)",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792834046985-743",
-      "timestamp": "2026-10-24T09:27:26.986Z",
-      "actor": "Stevo Tech (Admin/Owner)",
-      "action": "Manual Payment Request Submitted",
-      "category": "WALLET",
-      "details": "Stevo Tech (Admin/Owner) (CUST-1001) submitted manual transfer of ₦5,000 [Ref: MAN-DEP-046955-6280]",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792834046942-328",
-      "timestamp": "2026-10-24T09:27:26.942Z",
-      "actor": "Super Administrator",
-      "action": "Admin Panel Authenticated",
-      "category": "AUTH",
-      "details": "Successful administrator authentication session created from 127.0.0.1.",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792831368948-807",
-      "timestamp": "2026-10-24T08:42:48.948Z",
-      "actor": "Chinedu Eze",
+      "id": "aud-1792917793731-727",
+      "timestamp": "2026-10-25T08:43:13.731Z",
+      "actor": "David Adeleke",
       "action": "Customer Account Created",
       "category": "AUTH",
-      "details": "New customer registered: Chinedu Eze (chinedu@example.com), Referral Code: SL-3689487B1B",
-      "ip": "127.0.0.1",
-      "status": "Success"
-    },
-    {
-      "id": "aud-1792831005769-767",
-      "timestamp": "2026-10-24T08:36:45.769Z",
-      "actor": "Adebayo Tester",
-      "action": "Customer Account Created",
-      "category": "AUTH",
-      "details": "New customer registered: Adebayo Tester (adebayo_test_1@example.com), Referral Code: SL-0057693C51",
+      "details": "New customer registered permanently: David Adeleke (customer_test_1792917793697@example.com), ID: CUST-793730, Referral Code: SL-793730F743",
       "ip": "127.0.0.1",
       "status": "Success"
     },
@@ -57190,6 +57058,5 @@
     }
   ],
   "specialOrders": [],
-  "manualPaymentRequests": [],
-  "notifications": []
+  "manualPaymentRequests": []
 }

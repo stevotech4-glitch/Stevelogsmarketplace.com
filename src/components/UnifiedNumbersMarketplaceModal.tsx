@@ -20,7 +20,7 @@ import {
   Layers,
   Info
 } from 'lucide-react';
-import { CustomerNumberOffer, UserWallet, CustomerRecord } from '../types';
+import { CustomerNumberOffer, UserWallet } from '../types';
 
 interface UnifiedNumbersMarketplaceModalProps {
   isOpen: boolean;
@@ -28,7 +28,6 @@ interface UnifiedNumbersMarketplaceModalProps {
   wallet: UserWallet;
   onOrderSuccess: (order: any) => void;
   initialServiceCategory?: 'usa' | 'all';
-  customer?: CustomerRecord | null;
 }
 
 export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceModalProps> = ({
@@ -37,7 +36,6 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
   wallet,
   onOrderSuccess,
   initialServiceCategory = 'usa',
-  customer,
 }) => {
   // Step 1: Category selection ('usa' | 'all')
   const [serviceCategory, setServiceCategory] = useState<'usa' | 'all'>(initialServiceCategory);
@@ -78,6 +76,11 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
   const [checkingSms, setCheckingSms] = useState(false);
   const [smsCountdown, setSmsCountdown] = useState<number>(600); // 10 minutes
   const [cancellingOrder, setCancellingOrder] = useState(false);
+
+  // Optional BenOTP routing parameters (Carrier & Area Codes)
+  const [selectedCarrier, setSelectedCarrier] = useState<string>('any');
+  const [selectedAreaCode, setSelectedAreaCode] = useState<string>('any');
+  const [customAreaCode, setCustomAreaCode] = useState<string>('');
 
   const serviceDropdownRef = useRef<HTMLDivElement>(null);
   const countryDropdownRef = useRef<HTMLDivElement>(null);
@@ -241,38 +244,29 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
     setError(null);
 
     const serverLabel = serviceCategory === 'usa' ? `USA Server ${selectedServer}` : `Server ${selectedServer}`;
-    const effectiveCustId = customer?.id || localStorage.getItem('stevelogs_customer_id') || 'CUST-1001';
-    const effectiveCustName = customer?.name || 'Customer';
-    const token = localStorage.getItem('stevelogs_customer_token');
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'x-customer-id': effectiveCustId,
-    };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      headers['x-customer-token'] = token;
-    }
 
     try {
       const res = await fetch('/api/orders/create', {
         method: 'POST',
-        headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-customer-id': 'CUST-1001',
+        },
         body: JSON.stringify({
-          customerId: effectiveCustId,
-          customerName: effectiveCustName,
+          customerId: 'CUST-1001',
+          customerName: 'Stevo Tech',
           serviceType: serviceCategory === 'usa' ? 'USA Numbers' : 'All Countries Numbers',
           productName: `${selectedOffer.serviceName} (${selectedOffer.countryName})`,
           amount: selectedOffer.sellingPrice,
-          idempotencyKey: `ord_${effectiveCustId}_${selectedOffer.id}_${Date.now()}`,
           details: {
             offerId: selectedOffer.id,
             dialCode: selectedOffer.dialCode,
             countryCode: selectedOffer.countryCode,
             serviceId: selectedOffer.serviceId,
-            serviceName: selectedOffer.serviceName,
-            countryName: selectedOffer.countryName,
             serverName: serverLabel,
+            serverNumber: selectedServer,
+            carrier: selectedCarrier !== 'any' ? selectedCarrier : undefined,
+            areaCode: selectedAreaCode === 'custom' ? customAreaCode.trim() : (selectedAreaCode !== 'any' ? selectedAreaCode : undefined),
           },
         }),
       });
@@ -847,6 +841,58 @@ export const UnifiedNumbersMarketplaceModal: React.FC<UnifiedNumbersMarketplaceM
                   </strong>
                 </div>
               </div>
+
+              {/* Optional BenOTP Carrier & Area Code Routing (Handler API & Handler Stubs support) */}
+              {(serviceCategory === 'usa' || selectedServer <= 2) && (
+                <div className="p-3 bg-white rounded-2xl border border-blue-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold text-slate-500 uppercase">
+                      Carrier:
+                    </span>
+                    <select
+                      value={selectedCarrier}
+                      onChange={(e) => setSelectedCarrier(e.target.value)}
+                      className="px-2.5 py-1 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                    >
+                      <option value="any">Any Carrier (Fastest)</option>
+                      <option value="att">AT&T Mobility</option>
+                      <option value="verizon">Verizon Wireless</option>
+                      <option value="tmobile">T-Mobile USA</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono font-bold text-slate-500 uppercase">
+                      Area Code:
+                    </span>
+                    <select
+                      value={selectedAreaCode}
+                      onChange={(e) => setSelectedAreaCode(e.target.value)}
+                      className="px-2.5 py-1 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                    >
+                      <option value="any">Any Area Code</option>
+                      <option value="212">212 (New York, NY)</option>
+                      <option value="310">310 (Los Angeles, CA)</option>
+                      <option value="415">415 (San Francisco, CA)</option>
+                      <option value="305">305 (Miami, FL)</option>
+                      <option value="773">773 (Chicago, IL)</option>
+                      <option value="404">404 (Atlanta, GA)</option>
+                      <option value="713">713 (Houston, TX)</option>
+                      <option value="custom">Custom Area Code...</option>
+                    </select>
+                    {selectedAreaCode === 'custom' && (
+                      <input
+                        type="text"
+                        maxLength={3}
+                        placeholder="e.g. 214"
+                        value={customAreaCode}
+                        onChange={(e) => setCustomAreaCode(e.target.value.replace(/\D/g, ''))}
+                        className="w-16 px-2 py-1 rounded-xl bg-slate-50 border border-slate-200 font-mono text-xs text-center font-bold"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Action Button (BenOTP Style Prominent Buy Button) */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">

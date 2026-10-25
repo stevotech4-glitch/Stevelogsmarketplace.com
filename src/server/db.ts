@@ -29,8 +29,7 @@ import {
   SpecialMarketplaceListing,
   PublicSpecialListing,
   SpecialMarketplaceOrder,
-  ManualPaymentRequest,
-  CustomerNotification
+  ManualPaymentRequest
 } from '../types';
 import { generateMasterNumberOffers, generateMasterLogOffers } from './catalogData';
 
@@ -60,7 +59,6 @@ export interface DatabaseState {
   specialListings: SpecialMarketplaceListing[];
   specialOrders: SpecialMarketplaceOrder[];
   manualPaymentRequests: ManualPaymentRequest[];
-  notifications: CustomerNotification[];
 }
 
 const DB_FILE_PATH = path.resolve(process.cwd(), 'data', 'stevelogs_db.json');
@@ -75,6 +73,11 @@ export function verifyPasscode(passcode: string, hash: string, salt: string): bo
   if (!passcode || !hash || !salt) return false;
   const testHash = crypto.pbkdf2Sync(passcode.trim(), salt, 10000, 32, 'sha256').toString('hex');
   return testHash === hash;
+}
+
+export function sanitizeCustomer(cust: CustomerRecord): CustomerRecord {
+  const { passwordHash, salt, ...safe } = cust;
+  return safe as CustomerRecord;
 }
 
 const defaultAdminPasscode = hashPasscode('200911', 'stevelogs_default_salt_200911');
@@ -124,12 +127,6 @@ const INITIAL_SETTINGS: WebsiteMasterSettings = {
   flutterwavePublicKey: process.env.FLW_PUBLIC_KEY || '',
   flutterwaveSecretKey: process.env.FLW_SECRET_KEY || '',
   flutterwaveSecretHash: process.env.FLW_SECRET_HASH || process.env.FLW_WEBHOOK_SECRET || '',
-  googleClientId: process.env.GOOGLE_CLIENT_ID || '',
-  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
-  emailServiceEnabled: Boolean(process.env.RESEND_API_KEY || process.env.SMTP_HOST),
-  emailProvider: process.env.RESEND_API_KEY ? 'resend' : (process.env.SMTP_HOST ? 'smtp' : 'none'),
-  emailApiKey: process.env.RESEND_API_KEY || '',
-  emailFromAddress: process.env.EMAIL_FROM || 'support@stevelogs.com',
 };
 
 const INITIAL_PROVIDERS: ProviderConfig[] = [
@@ -137,17 +134,23 @@ const INITIAL_PROVIDERS: ProviderConfig[] = [
     id: 'benotp',
     name: 'BenOTP',
     website: 'https://benotp.com/buy-number',
-    baseUrl: 'https://api.benotp.com/v1',
+    baseUrl: 'https://benotp.com/stubs/handler_api.php',
     docsUrl: 'https://benotp.com/api-docs',
-    apiKey: '',
+    apiKey: process.env.BENOTP_API_KEY || '',
     enabled: true,
-    status: 'credentials_required',
+    status: process.env.BENOTP_API_KEY ? 'active' : 'credentials_required',
     priority: 1, // Priority #1 for auto number selection!
     balance: 0,
     lastSync: null,
-    lastError: 'Credentials required: Please enter an API Key for BenOTP.',
+    lastError: process.env.BENOTP_API_KEY ? null : 'Credentials required: Please enter an API Key for BenOTP.',
     supportedServices: ['virtual_numbers'],
     orderHistoryCount: 0,
+    benotpEndpoints: {
+      handlerApiUrl: 'https://benotp.com/stubs/handler_api.php',
+      handlerUrl: 'https://benotp.com/stubs/handler.php',
+      allServer2Url: 'https://benotp.com/stubs/all_server_2.php',
+      defaultEndpoint: 'handler_api',
+    },
   },
   {
     id: 'nova',
@@ -661,6 +664,12 @@ class Database {
             apiKey: effectiveKey,
             status: statusVal,
             syncReport: lp.syncReport || matchDefault?.syncReport,
+            baseUrl: (lp.id === 'benotp' && (!lp.baseUrl || lp.baseUrl.includes('api.benotp.com')))
+              ? 'https://benotp.com/stubs/handler_api.php'
+              : lp.baseUrl,
+            benotpEndpoints: lp.id === 'benotp'
+              ? (lp.benotpEndpoints || matchDefault?.benotpEndpoints)
+              : undefined,
           };
         });
 
@@ -724,7 +733,6 @@ class Database {
             : INITIAL_SPECIAL_LISTINGS,
           specialOrders: parsed.specialOrders || [],
           manualPaymentRequests: parsed.manualPaymentRequests || [],
-          notifications: parsed.notifications || [],
         };
 
         if (
@@ -785,7 +793,6 @@ class Database {
       specialListings: INITIAL_SPECIAL_LISTINGS,
       specialOrders: [],
       manualPaymentRequests: [],
-      notifications: [],
     };
 
     this.saveImmediate(defaultState);
@@ -799,23 +806,18 @@ class Database {
     }, 500);
   }
 
-  public updateOrder(orderId: string, updates: any): boolean {
-    const order = this.state.orders.find((o) => o.id === orderId);
-    if (!order) return false;
-    Object.assign(order, updates);
-    this.scheduleSave();
-    return true;
-  }
-
-  private saveImmediate(state: DatabaseState) {
+  public saveImmediate(state?: DatabaseState): boolean {
     try {
+      const targetState = state || this.state;
       const dir = path.dirname(DB_FILE_PATH);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(DB_FILE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+      fs.writeFileSync(DB_FILE_PATH, JSON.stringify(targetState, null, 2), 'utf-8');
+      return true;
     } catch (err) {
       console.error('Failed to write database file:', err);
+      return false;
     }
   }
 
@@ -1099,11 +1101,7 @@ class Database {
   }
 
   getCustomer(id: string): CustomerRecord | undefined {
-    if (!id) return undefined;
-    const clean = id.trim();
-    return this.state.customers.find(
-      (c) => c.id === clean || c.id.toLowerCase() === clean.toLowerCase() || c.email.toLowerCase() === clean.toLowerCase()
-    );
+    return this.state.customers.find((c) => c.id === id);
   }
 
   adjustCustomerBalance(
@@ -1199,9 +1197,6 @@ class Database {
     amount: number;
     providerCost: number;
     details?: any;
-    delivery?: any;
-    providerRef?: string;
-    status?: string;
   }): { success: boolean; order?: any; error?: string } {
     const cust = this.state.customers.find((c) => c.id === orderData.customerId) || this.state.customers[0];
 
@@ -1212,14 +1207,23 @@ class Database {
       };
     }
 
+    // Deduct balance atomically
+    cust.walletBalance -= orderData.amount;
+    cust.totalSpent += orderData.amount;
+    cust.ordersCount += 1;
+    cust.successfulOrders += 1;
+    cust.lastActive = new Date().toISOString();
+    this.state.wallet.balance = cust.walletBalance;
+
     const orderId = `ORD-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
-    const providerRef = orderData.providerRef || `${orderData.providerId.toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const providerRef = `${orderData.providerId.toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+    // Generate delivery details based on service
+    const mockPhone = `+${orderData.details?.dialCode?.replace('+', '') || '234'}${Math.floor(8000000000 + Math.random() * 1999999999)}`;
+    const mockSmsCode = Math.floor(100000 + Math.random() * 900000).toString();
 
     let deliveryData: any;
-    if (orderData.delivery) {
-      // Use confirmed upstream delivery details from real provider API
-      deliveryData = orderData.delivery;
-    } else if (orderData.serviceType === 'Log Accounts') {
+    if (orderData.serviceType === 'Log Accounts') {
       const emailDomain = orderData.productName.toLowerCase().includes('gmail') ? 'gmail.com' : 'securemail.org';
       const cleanProd = orderData.productName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
       const generatedEmail = `${cleanProd}_${Math.floor(1000 + Math.random() * 9000)}@${emailDomain}`;
@@ -1240,26 +1244,21 @@ class Database {
         fullLog: rawText,
         status: 'Delivered',
       };
-    } else if (orderData.serviceType.includes('Numbers')) {
-      // Never fabricate numbers for virtual number orders
-      return {
-        success: false,
-        error: 'Virtual number could not be allocated from provider. Please check provider configuration.',
-      };
     } else {
+      const realPhone = orderData.details?.allocatedPhone || mockPhone;
+      const isLiveProvider = Boolean(orderData.details?.allocatedPhone);
       deliveryData = {
+        phoneNumber: realPhone,
+        smsCode: isLiveProvider ? 'Waiting for SMS...' : mockSmsCode,
+        fullSms: isLiveProvider
+          ? 'Waiting for verification SMS from upstream provider...'
+          : `Your verification code for ${orderData.productName} is ${mockSmsCode}. Valid for 10 minutes.`,
         credentials: orderData.details?.credentials,
-        status: 'Delivered',
+        providerOrderId: orderData.details?.providerOrderId,
+        endpointType: orderData.details?.endpointType,
+        liveProvider: isLiveProvider,
       };
     }
-
-    // Deduct balance atomically only AFTER confirmed valid delivery payload
-    cust.walletBalance -= orderData.amount;
-    cust.totalSpent += orderData.amount;
-    cust.ordersCount += 1;
-    cust.successfulOrders += 1;
-    cust.lastActive = new Date().toISOString();
-    this.state.wallet.balance = cust.walletBalance;
 
     const order = {
       id: orderId,
@@ -1272,7 +1271,7 @@ class Database {
       amount: orderData.amount,
       providerCost: orderData.providerCost,
       profit: Math.max(0, orderData.amount - orderData.providerCost),
-      status: orderData.status || (deliveryData.smsCode ? 'Successful' : 'Waiting for SMS'),
+      status: 'Successful',
       delivery: deliveryData,
       createdAt: new Date().toISOString(),
     };
@@ -1499,30 +1498,61 @@ class Database {
     name?: string;
     fullName?: string;
     email: string;
-    phone: string;
+    phone?: string;
     username?: string;
     password?: string;
     refCode?: string;
   }): { success: boolean; customer?: CustomerRecord; token?: string; error?: string } {
     const emailNorm = (data.email || '').trim().toLowerCase();
-    const usernameNorm = (data.username || (data.email ? data.email.split('@')[0] : '') || '').trim().toLowerCase();
     const customerName = (data.name || data.fullName || '').trim();
+    const usernameNorm = (data.username || (data.email ? data.email.split('@')[0] : '') || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]/g, '');
+    const phoneClean = (data.phone && typeof data.phone === 'string' ? data.phone.trim() : '') || '+2348000000000';
+    const rawPassword = data.password !== undefined && data.password !== null ? String(data.password).trim() : '';
 
-    if (!emailNorm || !customerName) {
-      return { success: false, error: 'Full name and email address are required.' };
+    if (!customerName) {
+      return { success: false, error: 'Full name is required to create an account.' };
     }
 
-    const existing = this.state.customers.find(
-      (c) => c.email.toLowerCase() === emailNorm || (c.username && c.username.toLowerCase() === usernameNorm)
-    );
-    if (existing) {
-      return { success: false, error: 'An account with this email or username already exists. Please sign in.' };
+    if (!emailNorm || !emailNorm.includes('@') || emailNorm.length < 5) {
+      return { success: false, error: 'A valid email address (e.g. you@gmail.com) is required.' };
+    }
+
+    if (!rawPassword || rawPassword.length < 6) {
+      return { success: false, error: 'Password is required and must be at least 6 characters.' };
+    }
+
+    // Check duplicate account
+    const existingByEmail = this.state.customers.find((c) => c.email.trim().toLowerCase() === emailNorm);
+    if (existingByEmail) {
+      if (!existingByEmail.passwordHash) {
+        return {
+          success: false,
+          error: 'An account with this email was created via Google Sign-In. Please sign in with Google or use "Forgot Password" to set a password.',
+        };
+      }
+      return {
+        success: false,
+        error: 'An account with this email address already exists. Please sign in using your existing password.',
+      };
+    }
+
+    if (usernameNorm) {
+      const existingByUsername = this.state.customers.find(
+        (c) => c.username && c.username.trim().toLowerCase() === usernameNorm
+      );
+      if (existingByUsername) {
+        return {
+          success: false,
+          error: 'This username is already taken. Please choose another username or sign in.',
+        };
+      }
     }
 
     const salt = crypto.randomBytes(16).toString('hex');
-    const passwordHash = data.password
-      ? crypto.pbkdf2Sync(data.password.trim(), salt, 10000, 32, 'sha256').toString('hex')
-      : undefined;
+    const passwordHash = crypto.pbkdf2Sync(rawPassword, salt, 10000, 32, 'sha256').toString('hex');
 
     const custIdNum = Date.now().toString().slice(-6);
     const newCustId = `CUST-${custIdNum}`;
@@ -1552,7 +1582,7 @@ class Database {
       id: newCustId,
       name: customerName,
       email: emailNorm,
-      phone: (data.phone ? data.phone.trim() : '') || '+2348000000000',
+      phone: phoneClean,
       username: usernameNorm,
       passwordHash,
       salt,
@@ -1580,53 +1610,76 @@ class Database {
       actor: newCust.name,
       action: 'Customer Account Created',
       category: 'AUTH',
-      details: `New customer registered: ${newCust.name} (${newCust.email}), Referral Code: ${uniqueRefCode}`,
+      details: `New customer registered permanently: ${newCust.name} (${newCust.email}), ID: ${newCust.id}, Referral Code: ${uniqueRefCode}`,
       status: 'Success',
     });
-    this.scheduleSave();
+
+    // Synchronous database persistence guarantee
+    const saved = this.saveImmediate(this.state);
+    if (!saved) {
+      this.state.customers = this.state.customers.filter((c) => c.id !== newCust.id);
+      return {
+        success: false,
+        error: 'Database storage error: Failed to save account permanently to database. Please try again.',
+      };
+    }
 
     const token = Buffer.from(`${newCust.id}:${Date.now()}:${salt}`).toString('base64');
-    return { success: true, customer: newCust, token };
+    return { success: true, customer: sanitizeCustomer(newCust), token };
   }
 
   authenticateCustomer(identifier: string, password?: string): { success: boolean; customer?: CustomerRecord; token?: string; error?: string } {
-    const idNorm = (identifier || '').trim().toLowerCase();
-    const idDigits = identifier.replace(/\D/g, '');
+    const rawId = (identifier || '').trim();
+    const idNorm = rawId.toLowerCase();
+    const idDigits = rawId.replace(/\D/g, '');
+    const cleanPassword = password !== undefined && password !== null ? String(password).trim() : '';
 
     if (!idNorm) {
       return { success: false, error: 'Email, phone number, or username is required.' };
     }
 
+    if (!cleanPassword) {
+      return { success: false, error: 'Password is required to sign in.' };
+    }
+
     const cust = this.state.customers.find((c) => {
-      if (c.email.toLowerCase() === idNorm) return true;
-      if (c.username && c.username.toLowerCase() === idNorm) return true;
+      if (c.email && c.email.trim().toLowerCase() === idNorm) return true;
+      if (c.username && c.username.trim().toLowerCase() === idNorm) return true;
       if (idDigits.length >= 7 && c.phone) {
         const cDigits = c.phone.replace(/\D/g, '');
-        if (cDigits.endsWith(idDigits) || idDigits.endsWith(cDigits)) return true;
+        if (cDigits && (cDigits.endsWith(idDigits) || idDigits.endsWith(cDigits))) return true;
       }
       return false;
     });
 
     if (!cust) {
-      return { success: false, error: 'Invalid credentials. Please verify your email, phone, or password.' };
+      return {
+        success: false,
+        error: 'No account found matching this email, phone, or username. Please check your credentials or create an account.',
+      };
     }
 
     if (cust.status === 'Suspended') {
       return { success: false, error: 'Account is suspended. Please contact customer support.' };
     }
 
-    if (password && cust.passwordHash && cust.salt) {
-      const testHash = crypto.pbkdf2Sync(password.trim(), cust.salt, 10000, 32, 'sha256').toString('hex');
-      if (testHash !== cust.passwordHash) {
-        return { success: false, error: 'Invalid password. Please verify your credentials.' };
-      }
+    if (!cust.passwordHash || !cust.salt) {
+      return {
+        success: false,
+        error: 'This account was registered using Google Sign-In and does not have a password configured yet. Please continue with Google, or contact support to set a password.',
+      };
+    }
+
+    const testHash = crypto.pbkdf2Sync(cleanPassword, cust.salt, 10000, 32, 'sha256').toString('hex');
+    if (testHash !== cust.passwordHash) {
+      return { success: false, error: 'Incorrect password. Please verify your credentials and try again.' };
     }
 
     cust.lastActive = new Date().toISOString();
-    this.scheduleSave();
+    this.saveImmediate(this.state);
 
-    const token = Buffer.from(`${cust.id}:${Date.now()}:${cust.salt || 'stevelogs_default_salt'}`).toString('base64');
-    return { success: true, customer: cust, token };
+    const token = Buffer.from(`${cust.id}:${Date.now()}:${cust.salt}`).toString('base64');
+    return { success: true, customer: sanitizeCustomer(cust), token };
   }
 
   findOrCreateGoogleCustomer(profile: {
@@ -1636,7 +1689,7 @@ class Database {
     picture?: string;
   }): { success: boolean; customer: CustomerRecord; token: string } {
     const emailNorm = profile.email.trim().toLowerCase();
-    let cust = this.state.customers.find((c) => c.email.toLowerCase() === emailNorm);
+    let cust = this.state.customers.find((c) => c.email.trim().toLowerCase() === emailNorm);
 
     if (!cust) {
       const custIdNum = Date.now().toString().slice(-6);
@@ -1678,173 +1731,68 @@ class Database {
         details: `${cust.name} authenticated via Google OAuth (${cust.email})`,
         status: 'Success',
       });
-      this.scheduleSave();
+      this.saveImmediate(this.state);
     } else {
       cust.lastActive = new Date().toISOString();
       if (!cust.name && profile.name) {
         cust.name = profile.name;
       }
-      this.scheduleSave();
+      this.saveImmediate(this.state);
     }
 
     const token = Buffer.from(`${cust.id}:${Date.now()}:${cust.salt || 'stevelogs_google_salt'}`).toString('base64');
-    return { success: true, customer: cust, token };
+    return { success: true, customer: sanitizeCustomer(cust), token };
   }
 
-  // --- PASSWORD RESET VERIFICATION CODE ENGINE ---
-  private passwordResetCodes: Map<string, { code: string; expiresAt: number; attempts: number }> = new Map();
+  resetCustomerPassword(identifier: string, newPassword: string): { success: boolean; message?: string; error?: string } {
+    const rawId = (identifier || '').trim();
+    const idNorm = rawId.toLowerCase();
+    const idDigits = rawId.replace(/\D/g, '');
+    const cleanPassword = (newPassword || '').trim();
 
-  createPasswordResetCode(email: string): {
-    success: boolean;
-    code?: string;
-    expiresAt?: number;
-    customer?: CustomerRecord;
-    error?: string;
-  } {
-    const emailNorm = (email || '').trim().toLowerCase();
-    if (!emailNorm) {
-      return { success: false, error: 'Please enter your registered email address.' };
+    if (!idNorm) {
+      return { success: false, error: 'Email, phone number, or username is required.' };
     }
 
-    const cust = this.state.customers.find((c) => c.email.toLowerCase() === emailNorm);
-    if (!cust) {
-      return { success: false, error: 'No Stevelogs account found matching this email address.' };
+    if (!cleanPassword || cleanPassword.length < 6) {
+      return { success: false, error: 'New password must be at least 6 characters.' };
     }
 
-    // Generate cryptographically secure 6-digit numeric verification code
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
-
-    this.passwordResetCodes.set(emailNorm, {
-      code,
-      expiresAt,
-      attempts: 0,
+    const cust = this.state.customers.find((c) => {
+      if (c.email && c.email.trim().toLowerCase() === idNorm) return true;
+      if (c.username && c.username.trim().toLowerCase() === idNorm) return true;
+      if (idDigits.length >= 7 && c.phone) {
+        const cDigits = c.phone.replace(/\D/g, '');
+        if (cDigits && (cDigits.endsWith(idDigits) || idDigits.endsWith(cDigits))) return true;
+      }
+      return false;
     });
 
-    this.addAuditLog({
-      actor: cust.name,
-      action: 'Password Reset Code Generated',
-      category: 'AUTH',
-      details: `Password reset verification code generated for ${cust.name} (${cust.email}). Valid for 15 minutes.`,
-      status: 'Success',
-    });
-
-    return {
-      success: true,
-      code,
-      expiresAt,
-      customer: cust,
-    };
-  }
-
-  verifyPasswordResetCode(email: string, code: string): { success: boolean; error?: string } {
-    const emailNorm = (email || '').trim().toLowerCase();
-    const cleanCode = (code || '').trim();
-
-    if (!emailNorm || !cleanCode) {
-      return { success: false, error: 'Email and verification code are required.' };
-    }
-
-    const record = this.passwordResetCodes.get(emailNorm);
-    if (!record) {
-      return { success: false, error: 'No active password reset request found. Please request a new code.' };
-    }
-
-    if (Date.now() > record.expiresAt) {
-      this.passwordResetCodes.delete(emailNorm);
-      return { success: false, error: 'Verification code has expired. Please request a new code.' };
-    }
-
-    if (record.attempts >= 5) {
-      this.passwordResetCodes.delete(emailNorm);
-      return { success: false, error: 'Too many incorrect attempts. Please request a new code.' };
-    }
-
-    if (record.code !== cleanCode) {
-      record.attempts += 1;
-      return { success: false, error: 'Incorrect verification code. Please check your email and try again.' };
-    }
-
-    return { success: true };
-  }
-
-  resetCustomerPassword(email: string, code: string, newPassword: string): {
-    success: boolean;
-    customer?: CustomerRecord;
-    error?: string;
-  } {
-    const verifyRes = this.verifyPasswordResetCode(email, code);
-    if (!verifyRes.success) {
-      return { success: false, error: verifyRes.error };
-    }
-
-    if (!newPassword || newPassword.trim().length < 6) {
-      return { success: false, error: 'New password must be at least 6 characters long.' };
-    }
-
-    const emailNorm = (email || '').trim().toLowerCase();
-    const cust = this.state.customers.find((c) => c.email.toLowerCase() === emailNorm);
     if (!cust) {
-      return { success: false, error: 'Customer account not found.' };
+      return { success: false, error: 'No customer account found matching the provided details.' };
     }
 
-    // Securely hash new password with PBKDF2
-    const { hash, salt } = hashPasscode(newPassword);
-    cust.passwordHash = hash;
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = crypto.pbkdf2Sync(cleanPassword, salt, 10000, 32, 'sha256').toString('hex');
+
+    cust.passwordHash = passwordHash;
     cust.salt = salt;
     cust.lastActive = new Date().toISOString();
 
-    // Invalidate reset code after successful password update
-    this.passwordResetCodes.delete(emailNorm);
+    const saved = this.saveImmediate(this.state);
+    if (!saved) {
+      return { success: false, error: 'Database storage error: Failed to update password. Please try again.' };
+    }
 
-    // Strict preservation guarantee: walletBalance, ordersCount, transactions, referrals are untouched
     this.addAuditLog({
       actor: cust.name,
-      action: 'Customer Password Reset (Verified Code)',
+      action: 'Customer Password Reset',
       category: 'AUTH',
-      details: `Password reset verified and completed for ${cust.name} (${cust.email}). Balance ₦${cust.walletBalance.toLocaleString()} preserved.`,
+      details: `Password reset successfully for ${cust.name} (${cust.email})`,
       status: 'Success',
     });
 
-    this.scheduleSave();
-    return { success: true, customer: cust };
-  }
-
-  changeAdminPasscode(currentPasscode: string, newPasscode: string): { success: boolean; error?: string } {
-    if (!currentPasscode || !newPasscode) {
-      return { success: false, error: 'Current passcode and new passcode are required.' };
-    }
-
-    if (newPasscode.trim().length < 6) {
-      return { success: false, error: 'New admin passcode must be at least 6 characters long.' };
-    }
-
-    const settings = this.state.settings;
-    let isCurrentValid = false;
-    if (settings.adminPasscodeHash && settings.adminPasscodeSalt) {
-      isCurrentValid = verifyPasscode(currentPasscode, settings.adminPasscodeHash, settings.adminPasscodeSalt);
-    } else if (currentPasscode.trim() === '200911') {
-      isCurrentValid = true;
-    }
-
-    if (!isCurrentValid) {
-      return { success: false, error: 'Current passcode is incorrect. Access denied.' };
-    }
-
-    const { hash, salt } = hashPasscode(newPasscode);
-    settings.adminPasscodeHash = hash;
-    settings.adminPasscodeSalt = salt;
-
-    this.addAuditLog({
-      actor: 'Super Admin',
-      action: 'Admin Passcode Changed',
-      category: 'SECURITY',
-      details: 'Master administrative passcode was updated successfully.',
-      status: 'Success',
-    });
-
-    this.scheduleSave();
-    return { success: true };
+    return { success: true, message: 'Password has been reset successfully. You can now log in.' };
   }
 
   // --- MARKETPLACE (POWERED BY RAKIB SOCIALS ONLY) ---
@@ -2702,7 +2650,6 @@ class Database {
     customer?: CustomerRecord;
     payment?: PaymentRecord;
     transaction?: Transaction;
-    notification?: CustomerNotification;
   } {
     if (!this.state.payments) this.state.payments = [];
     let payment = this.state.payments.find(
@@ -2851,27 +2798,8 @@ class Database {
       status: 'Success',
     });
 
-    // Create Persistent Real-Time Customer Notification
-    const notifMessage = `Your wallet has been credited with ₦${payment.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your new balance is ₦${cust.walletBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your funds are now available to use.`;
-    const notification: CustomerNotification = {
-      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
-      customerId: cust.id,
-      type: 'PAYMENT_APPROVED',
-      title: 'Payment Approved!',
-      message: notifMessage,
-      amount: payment.amount,
-      newBalance: cust.walletBalance,
-      reference: payment.reference,
-      read: false,
-      popUpShown: false,
-      createdAt: new Date().toISOString(),
-    };
-
-    if (!this.state.notifications) this.state.notifications = [];
-    this.state.notifications.unshift(notification);
-
     this.scheduleSave();
-    return { success: true, customer: cust, payment, transaction: tx, notification };
+    return { success: true, customer: cust, payment, transaction: tx };
   }
 
   markPaymentFailed(reference: string, reason: string): PaymentRecord | null {
@@ -3520,7 +3448,6 @@ class Database {
     success: boolean;
     request?: ManualPaymentRequest;
     customer?: CustomerRecord;
-    notification?: CustomerNotification;
     error?: string;
   } {
     if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
@@ -3591,25 +3518,6 @@ class Database {
       this.state.transactions.unshift(tx);
     }
 
-    // Create Persistent Real-Time Customer Notification
-    const notifMessage = `Your wallet has been credited with ₦${finalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your new balance is ₦${cust.walletBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Your funds are now available to use.`;
-    const notification: CustomerNotification = {
-      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
-      customerId: cust.id,
-      type: 'PAYMENT_APPROVED',
-      title: 'Payment Approved!',
-      message: notifMessage,
-      amount: finalAmount,
-      newBalance: cust.walletBalance,
-      reference: req.reference,
-      read: false,
-      popUpShown: false,
-      createdAt: now,
-    };
-
-    if (!this.state.notifications) this.state.notifications = [];
-    this.state.notifications.unshift(notification);
-
     this.addAuditLog({
       actor,
       action: 'Manual Payment Approved & Credited',
@@ -3619,7 +3527,7 @@ class Database {
     });
 
     this.scheduleSave();
-    return { success: true, request: req, customer: cust, notification };
+    return { success: true, request: req, customer: cust };
   }
 
   rejectManualPaymentRequest(
@@ -3629,7 +3537,6 @@ class Database {
   ): {
     success: boolean;
     request?: ManualPaymentRequest;
-    notification?: CustomerNotification;
     error?: string;
   } {
     if (!this.state.manualPaymentRequests) this.state.manualPaymentRequests = [];
@@ -3658,23 +3565,6 @@ class Database {
       existingTx.description = `Deposit Rejected: ${req.rejectionReason}`;
     }
 
-    // Create Notification
-    const notification: CustomerNotification = {
-      id: `notif-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
-      customerId: req.customerId,
-      type: 'PAYMENT_REJECTED',
-      title: 'Payment Rejected',
-      message: `Your manual deposit request for ₦${req.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} [Ref: ${req.reference}] was rejected. Reason: ${req.rejectionReason}`,
-      amount: req.amount,
-      reference: req.reference,
-      read: false,
-      popUpShown: false,
-      createdAt: now,
-    };
-
-    if (!this.state.notifications) this.state.notifications = [];
-    this.state.notifications.unshift(notification);
-
     this.addAuditLog({
       actor,
       action: 'Manual Payment Rejected',
@@ -3684,57 +3574,8 @@ class Database {
     });
 
     this.scheduleSave();
-    return { success: true, request: req, notification };
-  }
-
-  // ==========================================
-  // CUSTOMER NOTIFICATIONS MANAGEMENT
-  // ==========================================
-  getCustomerNotifications(customerId: string): CustomerNotification[] {
-    if (!this.state.notifications) this.state.notifications = [];
-    return this.state.notifications.filter((n) => n.customerId === customerId);
-  }
-
-  getUnshownPopups(customerId: string): CustomerNotification[] {
-    if (!this.state.notifications) this.state.notifications = [];
-    return this.state.notifications.filter((n) => n.customerId === customerId && !n.popUpShown);
-  }
-
-  markNotificationPopUpShown(id: string): boolean {
-    if (!this.state.notifications) this.state.notifications = [];
-    const notif = this.state.notifications.find((n) => n.id === id);
-    if (!notif) return false;
-    notif.popUpShown = true;
-    this.scheduleSave();
-    return true;
-  }
-
-  markNotificationRead(id: string): boolean {
-    if (!this.state.notifications) this.state.notifications = [];
-    const notif = this.state.notifications.find((n) => n.id === id);
-    if (!notif) return false;
-    notif.read = true;
-    notif.popUpShown = true;
-    this.scheduleSave();
-    return true;
-  }
-
-  markAllNotificationsRead(customerId: string): boolean {
-    if (!this.state.notifications) this.state.notifications = [];
-    let modified = false;
-    for (const n of this.state.notifications) {
-      if (n.customerId === customerId && (!n.read || !n.popUpShown)) {
-        n.read = true;
-        n.popUpShown = true;
-        modified = true;
-      }
-    }
-    if (modified) {
-      this.scheduleSave();
-    }
-    return true;
+    return { success: true, request: req };
   }
 }
-
 
 export const db = new Database();

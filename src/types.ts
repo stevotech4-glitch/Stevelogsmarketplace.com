@@ -108,6 +108,12 @@ export interface ProviderConfig {
   supportedServices: string[];
   orderHistoryCount?: number;
   syncReport?: ProviderSyncReport;
+  benotpEndpoints?: {
+    handlerApiUrl?: string;
+    handlerUrl?: string;
+    allServer2Url?: string;
+    defaultEndpoint?: 'handler_api' | 'handler' | 'all_server_2';
+  };
 }
 
 export interface VirtualNumberOffer {
@@ -285,7 +291,6 @@ export interface WebsiteMasterSettings {
   logoUrl: string;
   contactEmail: string;
   whatsappSupportNumber: string;
-  callPhoneNumber?: string;
   whatsappSupportLabel: string;
   whatsappWelcomeMessage: string;
   whatsappSupportPlacement: 'all' | 'header' | 'floating';
@@ -325,16 +330,6 @@ export interface WebsiteMasterSettings {
   flutterwavePublicKey?: string;
   flutterwaveSecretKey?: string;
   flutterwaveSecretHash?: string;
-  googleClientId?: string;
-  googleClientSecret?: string;
-  emailServiceEnabled?: boolean;
-  emailProvider?: 'resend' | 'smtp' | 'sendgrid' | 'none';
-  emailApiKey?: string;
-  smtpHost?: string;
-  smtpPort?: number;
-  smtpUser?: string;
-  smtpPass?: string;
-  emailFromAddress?: string;
 }
 
 export interface ManualPaymentRequest {
@@ -825,22 +820,4 @@ export interface SpecialMarketplaceOrder {
   };
   purchasedAt: string;
 }
-
-// ==========================================
-// REAL-TIME NOTIFICATIONS
-// ==========================================
-export interface CustomerNotification {
-  id: string;
-  customerId: string;
-  type: 'PAYMENT_APPROVED' | 'PAYMENT_REJECTED' | 'ORDER_COMPLETED' | 'GENERAL';
-  title: string;
-  message: string;
-  amount?: number;
-  newBalance?: number;
-  reference?: string;
-  read: boolean;
-  popUpShown: boolean;
-  createdAt: string;
-}
-
 

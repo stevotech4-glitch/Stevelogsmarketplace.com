@@ -30,7 +30,6 @@ interface FundWalletModalProps {
   onClose: () => void;
   onAddFunds: (amount: number) => void;
   initialTab?: 'manual' | 'gateway' | 'history';
-  onTransactionUpdated?: () => void;
 }
 
 export const FundWalletModal: React.FC<FundWalletModalProps> = ({
@@ -39,7 +38,6 @@ export const FundWalletModal: React.FC<FundWalletModalProps> = ({
   onClose,
   onAddFunds,
   initialTab = 'manual',
-  onTransactionUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<'manual' | 'gateway' | 'history'>(initialTab);
 
@@ -244,9 +242,6 @@ export const FundWalletModal: React.FC<FundWalletModalProps> = ({
       setReceiptFileName(null);
       setTransferRef('');
       loadCustomerManualRequests();
-      if (onTransactionUpdated) {
-        onTransactionUpdated();
-      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Error submitting payment request.');
     } finally {

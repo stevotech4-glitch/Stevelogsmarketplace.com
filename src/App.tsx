@@ -20,8 +20,7 @@ import {
   InterestProgramConfig,
   CustomerRecord,
   AnnouncementItem,
-  SpecialMarketplaceOrder,
-  CustomerNotification
+  SpecialMarketplaceOrder
 } from './types';
 import { 
   initialWallet, 
@@ -73,7 +72,6 @@ import { SupportModal } from './components/SupportModal';
 import { AppDownloadModal } from './components/AppDownloadModal';
 import { SpecialMarketplaceModal } from './components/SpecialMarketplaceModal';
 import { AnnouncementPopupModal } from './components/AnnouncementPopupModal';
-import { PaymentApprovedModal } from './components/PaymentApprovedModal';
 
 const STORAGE_WALLET_KEY = 'stevelogs_wallet_v2';
 const STORAGE_TX_KEY = 'stevelogs_transactions_v2';
@@ -296,7 +294,6 @@ export default function App() {
     type: 'success' | 'error' | 'warning';
     message: string;
   } | null>(null);
-  const [paymentApprovalNotification, setPaymentApprovalNotification] = useState<CustomerNotification | null>(null);
 
   // Customer state & Authentication
   const [currentCustomer, setCurrentCustomer] = useState<CustomerRecord | null>(() => {
@@ -314,17 +311,20 @@ export default function App() {
   // Verify and sync customer session on mount
   useEffect(() => {
     const token = localStorage.getItem('stevelogs_customer_token');
-    if (token) {
+    const customerId = localStorage.getItem('stevelogs_customer_id');
+
+    if (token || customerId) {
       fetch('/api/auth/me', {
         headers: {
-          Authorization: `Bearer ${token}`,
-          'x-customer-token': token,
+          ...(token ? { Authorization: `Bearer ${token}`, 'x-customer-token': token } : {}),
+          ...(customerId ? { 'x-customer-id': customerId } : {}),
         },
       })
         .then((r) => r.json())
         .then((data) => {
           if (data && data.authenticated && data.customer) {
             setCurrentCustomer(data.customer);
+            localStorage.setItem('stevelogs_customer_id', data.customer.id);
             localStorage.setItem('stevelogs_customer_data', JSON.stringify(data.customer));
             if (data.wallet) {
               setWallet((prev) => ({
@@ -337,12 +337,13 @@ export default function App() {
             }
           } else {
             localStorage.removeItem('stevelogs_customer_token');
+            localStorage.removeItem('stevelogs_customer_id');
             localStorage.removeItem('stevelogs_customer_data');
             setCurrentCustomer(null);
           }
         })
         .catch(() => {
-          // If offline, preserve saved customer session
+          // If offline or network error, preserve saved customer session
         });
     } else {
       setCurrentCustomer(null);
@@ -350,174 +351,12 @@ export default function App() {
     }
   }, []);
 
-  // ==========================================
-  // REAL-TIME INSTANT BALANCE & APPROVAL LISTENER
-  // ==========================================
-  useEffect(() => {
-    if (!currentCustomer?.id) return;
-
-    let eventSource: EventSource | null = null;
-    let reconnectTimer: NodeJS.Timeout | null = null;
-
-    const connectSSE = () => {
-      try {
-        const sseUrl = `/api/realtime/events?customerId=${encodeURIComponent(currentCustomer.id)}`;
-        eventSource = new EventSource(sseUrl);
-
-        eventSource.addEventListener('payment_approved', (event: MessageEvent) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data && data.newBalance !== undefined) {
-              const newBal = Number(data.newBalance);
-              // Update balance everywhere on screen automatically
-              setWallet((prev) => {
-                const updated = { ...prev, balance: newBal };
-                try { localStorage.setItem(STORAGE_WALLET_KEY, JSON.stringify(updated)); } catch(e){}
-                return updated;
-              });
-
-              setCurrentCustomer((prev) => {
-                if (!prev) return null;
-                const updated = { ...prev, walletBalance: newBal };
-                try { localStorage.setItem('stevelogs_customer_data', JSON.stringify(updated)); } catch(e){}
-                return updated;
-              });
-
-              // Show instant celebration pop-up
-              if (data.notification) {
-                setPaymentApprovalNotification(data.notification);
-                // Mark pop-up as shown on server
-                fetch(`/api/notifications/${encodeURIComponent(data.notification.id)}/shown`, {
-                  method: 'POST',
-                  headers: { 'x-customer-id': currentCustomer.id },
-                }).catch(() => {});
-              }
-
-              // Refresh transactions ledger
-              fetch(`/api/transactions?customerId=${encodeURIComponent(currentCustomer.id)}`, {
-                headers: { 'x-customer-id': currentCustomer.id },
-              })
-                .then((r) => r.json())
-                .then((txs) => {
-                  if (Array.isArray(txs)) {
-                    setTransactions(txs);
-                    try { localStorage.setItem(STORAGE_TX_KEY, JSON.stringify(txs)); } catch(e){}
-                  }
-                })
-                .catch(() => {});
-            }
-          } catch (err) {
-            console.error('[Realtime] Failed to parse payment_approved event:', err);
-          }
-        });
-
-        eventSource.addEventListener('payment_rejected', (event: MessageEvent) => {
-          try {
-            const data = JSON.parse(event.data);
-            setPaymentNotice({
-              type: 'error',
-              message: `Deposit Rejected [Ref: ${data.reference || ''}]: ${data.rejectionReason || 'Contact support.'}`,
-            });
-          } catch (err) {}
-        });
-
-        eventSource.onerror = () => {
-          if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-          }
-          // Auto-reconnect after 4s
-          reconnectTimer = setTimeout(connectSSE, 4000);
-        };
-      } catch (err) {
-        console.warn('[Realtime] SSE connection error:', err);
-        reconnectTimer = setTimeout(connectSSE, 4000);
-      }
-    };
-
-    connectSSE();
-
-    // Periodic & On-Focus Instant Sync (Guarantee for offline reconnects or background tab wakeup)
-    const performSync = async () => {
-      try {
-        const res = await fetch(`/api/customer/sync?customerId=${encodeURIComponent(currentCustomer.id)}`, {
-          headers: { 'x-customer-id': currentCustomer.id },
-        });
-        const data = await res.json();
-        if (data && data.success && data.wallet) {
-          // Synchronize balance if changed
-          setWallet((prev) => {
-            if (prev.balance !== data.wallet.balance) {
-              const updated = { ...prev, balance: data.wallet.balance };
-              try { localStorage.setItem(STORAGE_WALLET_KEY, JSON.stringify(updated)); } catch(e){}
-              return updated;
-            }
-            return prev;
-          });
-
-          setCurrentCustomer((prev) => {
-            if (prev && prev.walletBalance !== data.wallet.balance) {
-              const updated = { ...prev, walletBalance: data.wallet.balance };
-              try { localStorage.setItem('stevelogs_customer_data', JSON.stringify(updated)); } catch(e){}
-              return updated;
-            }
-            return prev;
-          });
-
-          // Synchronize recent transactions if updated
-          if (Array.isArray(data.recentTransactions) && data.recentTransactions.length > 0) {
-            setTransactions((prev) => {
-              const existingIds = new Set(prev.map((t) => t.id));
-              const missing = data.recentTransactions.filter((t: any) => !existingIds.has(t.id));
-              if (missing.length > 0) {
-                const merged = [...missing, ...prev];
-                try { localStorage.setItem(STORAGE_TX_KEY, JSON.stringify(merged)); } catch(e){}
-                return merged;
-              }
-              return prev;
-            });
-          }
-
-          // Check for unshown payment approved notifications (e.g. approved while offline)
-          if (Array.isArray(data.unshownPopups) && data.unshownPopups.length > 0) {
-            const approvalPopup = data.unshownPopups.find(
-              (p: CustomerNotification) => p.type === 'PAYMENT_APPROVED'
-            );
-            if (approvalPopup) {
-              setPaymentApprovalNotification(approvalPopup);
-              fetch(`/api/notifications/${encodeURIComponent(approvalPopup.id)}/shown`, {
-                method: 'POST',
-                headers: { 'x-customer-id': currentCustomer.id },
-              }).catch(() => {});
-            }
-          }
-        }
-      } catch (e) {
-        // Offline safe
-      }
-    };
-
-    // Run sync immediately on connect
-    performSync();
-
-    // Background heartbeat poller every 3.5s for zero-delay reassurance
-    const pollInterval = setInterval(performSync, 3500);
-
-    const handleWindowFocus = () => {
-      performSync();
-    };
-    window.addEventListener('focus', handleWindowFocus);
-
-    return () => {
-      if (eventSource) eventSource.close();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      clearInterval(pollInterval);
-      window.removeEventListener('focus', handleWindowFocus);
-    };
-  }, [currentCustomer?.id]);
-
-  const handleCustomerAuthSuccess = (cust: CustomerRecord) => {
+  const handleCustomerAuthSuccess = (cust: CustomerRecord, token?: string) => {
     setCurrentCustomer(cust);
+    if (token) {
+      localStorage.setItem('stevelogs_customer_token', token);
+    }
+    localStorage.setItem('stevelogs_customer_id', cust.id);
     localStorage.setItem('stevelogs_customer_data', JSON.stringify(cust));
     if (cust.walletBalance !== undefined) {
       setWallet((prev) => ({
@@ -533,6 +372,7 @@ export default function App() {
 
   const handleCustomerLogout = () => {
     localStorage.removeItem('stevelogs_customer_token');
+    localStorage.removeItem('stevelogs_customer_id');
     localStorage.removeItem('stevelogs_customer_data');
     setCurrentCustomer(null);
   };
@@ -1349,21 +1189,6 @@ export default function App() {
           customer={currentCustomer}
           onClose={() => setIsFundWalletOpen(false)}
           onAddFunds={(amt) => handleCreditWallet(amt, 'Flutterwave Wallet Deposit')}
-          onTransactionUpdated={() => {
-            if (currentCustomer?.id) {
-              fetch(`/api/transactions?customerId=${encodeURIComponent(currentCustomer.id)}`, {
-                headers: { 'x-customer-id': currentCustomer.id },
-              })
-                .then((r) => r.json())
-                .then((txs) => {
-                  if (Array.isArray(txs)) {
-                    setTransactions(txs);
-                    try { localStorage.setItem(STORAGE_TX_KEY, JSON.stringify(txs)); } catch (e) {}
-                  }
-                })
-                .catch(() => {});
-            }
-          }}
         />
       )}
 
@@ -1430,7 +1255,6 @@ export default function App() {
           setActiveServiceModal(null);
         }}
         wallet={wallet}
-        customer={currentCustomer}
         onOrderSuccess={(order) => {
           handleDeductBalance(
             order.amount,
@@ -1503,25 +1327,10 @@ export default function App() {
           privacyPolicy: '',
         }}
         interestProgram={interestProgramConfig}
-        customer={currentCustomer}
-        onLogout={handleCustomerLogout}
-        onOpenAuth={(mode?: 'login' | 'register') => {
-          setIsProfileOpen(false);
-          setCustomerAuthMode(mode || 'login');
-          setIsCustomerAuthOpen(true);
-        }}
         onOpenFundWallet={() => {
           setIsProfileOpen(false);
           setIsFundWalletOpen(true);
         }}
-      />
-
-      {/* Dedicated Real-Time Payment Approved Celebration Modal */}
-      <PaymentApprovedModal
-        notification={paymentApprovalNotification}
-        onClose={() => setPaymentApprovalNotification(null)}
-        onOpenWallet={() => setIsFundWalletOpen(true)}
-        onOpenMarketplace={() => setIsMarketplaceOpen(true)}
       />
 
       {/* Floating Payment Notification Banner */}
